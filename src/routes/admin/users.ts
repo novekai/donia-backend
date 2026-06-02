@@ -151,6 +151,149 @@ router.post('/:id/credit-wallet', validate(creditSchema), async (req, res) => {
   res.json({ ok: true, userId: id, name: user.name, newBalance, adjusted: amount });
 });
 
+// TEMP-ADMIN-FIX: cleanup all admin_adjustment transactions for a user
+// and revert their balance impact. Used to "remettre comme avant" after
+// Play Store screenshots. To remove with the modal once captures are done.
+router.post('/:id/admin-transactions/clear', async (req, res) => {
+  const id = req.params.id as string;
+  const user = await prisma.user.findUnique({ where: { id }, include: { wallet: true } });
+  if (!user || !user.wallet) throw NotFound('User or wallet not found');
+
+  const adminTxs = await prisma.transaction.findMany({
+    where: {
+      userId: id,
+      metadata: { path: ['kind'], equals: 'admin_adjustment' },
+    },
+    select: { id: true, amount: true, type: true },
+  });
+
+  // Sum signed amounts: TOPUP_CODE was a credit (+), WITHDRAWAL was a debit (-).
+  const netDelta = adminTxs.reduce((sum, tx) => {
+    const signed = tx.type === 'WITHDRAWAL' ? -Number(tx.amount) : Number(tx.amount);
+    return sum + signed;
+  }, 0);
+
+  await prisma.$transaction([
+    prisma.wallet.update({
+      where: { userId: id },
+      data: { balancePrincipal: { decrement: new Prisma.Decimal(netDelta) } },
+    }),
+    prisma.transaction.deleteMany({
+      where: { id: { in: adminTxs.map((t) => t.id) } },
+    }),
+  ]);
+
+  const updated = await prisma.wallet.findUnique({ where: { userId: id } });
+  res.json({
+    ok: true,
+    userId: id,
+    cleared: adminTxs.length,
+    netReverted: netDelta,
+    newBalance: Number(updated?.balancePrincipal ?? 0),
+  });
+});
+
+// TEMP-ADMIN-FIX: change a user's referral code (for screenshot polish).
+const referralCodeSchema = z.object({
+  code: z.string().min(3).max(30).regex(/^[A-Z0-9\-_]+$/i, 'lettres, chiffres, - ou _ uniquement'),
+});
+
+router.patch('/:id/referral', validate(referralCodeSchema), async (req, res) => {
+  const id = req.params.id as string;
+  const { code } = req.body as z.infer<typeof referralCodeSchema>;
+  const normalized = code.trim().toUpperCase();
+
+  const taken = await prisma.user.findFirst({
+    where: { referralCode: normalized, NOT: { id } },
+    select: { id: true },
+  });
+  if (taken) throw NotFound(`Code "${normalized}" déjà utilisé`);
+
+  const updated = await prisma.user.update({
+    where: { id },
+    data: { referralCode: normalized },
+    select: { id: true, referralCode: true, name: true },
+  });
+  res.json({ ok: true, ...updated });
+});
+
+// TEMP-ADMIN-FIX: create N fake filleuls linked to this user (for screenshot polish).
+// Fake users are marked via email pattern `fake-*@donia.test` so they can be deleted.
+const fakeReferralsSchema = z.object({
+  count: z.coerce.number().int().min(1).max(20),
+  totalAmount: z.coerce.number().min(0).max(1_000_000).default(0),
+});
+
+const FAKE_NAMES = [
+  'Awa Diallo', 'Kofi Mensah', 'Aïcha Touré', 'Yaw Kwame', 'Fatou Ndiaye',
+  'Kojo Asante', 'Mariam Coulibaly', 'Sékou Sané', 'Adjoa Boateng', 'Moussa Bamba',
+  'Khadija Sow', 'Ibrahim Traoré', 'Lina Cissé', 'Rashid Mensah', 'Bineta Fall',
+  'Hassan Diop', 'Aminata Keita', 'Pape Sylla', 'Salimata Bah', 'Ousmane Camara',
+];
+
+router.post('/:id/fake-referrals', validate(fakeReferralsSchema), async (req, res) => {
+  const id = req.params.id as string;
+  const { count, totalAmount } = req.body as z.infer<typeof fakeReferralsSchema>;
+
+  const parrain = await prisma.user.findUnique({ where: { id }, select: { id: true } });
+  if (!parrain) throw NotFound('User not found');
+
+  // Reuse a placeholder password hash so the fake accounts can't be logged into.
+  const fakeHash = '$2b$10$FAKE.DONIA.SCREENSHOT.USER.HASH.UNUSABLE.PLACEHOLDER.';
+  const perReferralEarn = totalAmount > 0 ? totalAmount / count : 0;
+
+  const createdIds: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const suffix = `${Date.now().toString(36)}${i.toString(36).padStart(2, '0')}`;
+    const name = FAKE_NAMES[(i + Date.now()) % FAKE_NAMES.length]!;
+    const fake = await prisma.user.create({
+      data: {
+        phone: `+9999${suffix.slice(-9).padStart(9, '0')}`,
+        email: `fake-${suffix}@donia.test`,
+        name,
+        country: 'BJ',
+        passwordHash: fakeHash,
+        referralCode: `FAKE-${suffix.toUpperCase()}`,
+        referredBy: id,
+      },
+      select: { id: true },
+    });
+    await prisma.referral.create({
+      data: {
+        parrainId: id,
+        filleulId: fake.id,
+        totalEarned: new Prisma.Decimal(perReferralEarn),
+      },
+    });
+    createdIds.push(fake.id);
+  }
+
+  res.json({ ok: true, parrainId: id, created: createdIds.length, totalAmountAllocated: totalAmount });
+});
+
+router.delete('/:id/fake-referrals', async (req, res) => {
+  const id = req.params.id as string;
+
+  // Fake filleuls are identified by their email pattern AND being referred-by this user.
+  const fakes = await prisma.user.findMany({
+    where: { email: { startsWith: 'fake-', endsWith: '@donia.test' }, referredBy: id },
+    select: { id: true },
+  });
+  const fakeIds = fakes.map((u) => u.id);
+
+  if (fakeIds.length === 0) {
+    res.json({ ok: true, deleted: 0 });
+    return;
+  }
+
+  await prisma.$transaction([
+    prisma.referral.deleteMany({ where: { filleulId: { in: fakeIds } } }),
+    prisma.user.deleteMany({ where: { id: { in: fakeIds } } }),
+  ]);
+
+  res.json({ ok: true, deleted: fakeIds.length });
+});
+
 router.post('/by-identifier/credit-wallet', validate(creditByIdentifierSchema), async (req, res) => {
   const { identifier, amount, reason } = req.body as z.infer<typeof creditByIdentifierSchema>;
   const term = identifier.trim();
