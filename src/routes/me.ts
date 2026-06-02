@@ -85,4 +85,81 @@ router.delete('/avatar', async (req, res) => {
   res.json({ user });
 });
 
+// DELETE /v1/me — RGPD account deletion.
+// Soft delete + anonymisation des PII (nom, email, téléphone, photo, sexe, ville, dob, whatsapp).
+// On garde les transactions financières et les cartes (obligation BCEAO de conservation 10 ans
+// pour les ESM). Les sessions sont révoquées, les push tokens supprimés, les liens anonymes
+// désactivés (les messages déjà reçus restent en base mais ne sont plus liés à l'utilisateur).
+const deleteMeSchema = z.object({
+  // Anti-erreur : on demande à l'utilisateur de retaper "SUPPRIMER" en clair pour confirmer.
+  confirmation: z.literal('SUPPRIMER'),
+});
+
+router.delete('/', validate(deleteMeSchema), async (req, res) => {
+  if (!req.auth) throw Unauthorized();
+  const userId = req.auth.userId;
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, deletedAt: true },
+  });
+  if (!user) throw NotFound('User not found');
+  if (user.deletedAt) {
+    return res.json({ ok: true, alreadyDeleted: true });
+  }
+
+  // Anonymise PII : on garde une trace technique (id, deletedAt) mais on rend le compte
+  // ininstallable et invisible côté produit. Les valeurs uniques sont préfixées avec l'id
+  // pour ne pas violer les contraintes UNIQUE sur phone/email/referralCode.
+  const tombstone = `deleted-${userId}`;
+  const tombstoneEmail = `${tombstone}@deleted.donia.invalid`;
+  const tombstonePhone = `+0${userId.slice(-12).padStart(12, '0')}`;
+  const tombstoneCode = `DELETED-${userId.slice(-8).toUpperCase()}`;
+
+  await prisma.$transaction([
+    // 1. Anonymise les champs PII du user
+    prisma.user.update({
+      where: { id: userId },
+      data: {
+        deletedAt: new Date(),
+        name: 'Compte supprimé',
+        email: tombstoneEmail,
+        phone: tombstonePhone,
+        whatsapp: null,
+        avatarUrl: null,
+        sex: null,
+        dob: null,
+        city: null,
+        passwordHash: 'DELETED-ACCOUNT-NO-LOGIN',
+        referralCode: tombstoneCode,
+        birthdayOptIn: false,
+      },
+    }),
+    // 2. Révoque toutes les sessions actives (force le logout côté mobile)
+    prisma.session.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    }),
+    // 3. Supprime les push tokens (l'app ne recevra plus de notifs)
+    prisma.expoPushToken.deleteMany({ where: { userId } }),
+    // 4. Archive tous les liens anonymes (les nouveaux messages ne peuvent plus être envoyés)
+    prisma.anonymousLink.updateMany({
+      where: { userId, status: { not: 'ARCHIVED' } },
+      data: { status: 'ARCHIVED' },
+    }),
+    // 5. Supprime les OTP en cours
+    prisma.otp.deleteMany({ where: { userId } }),
+    // 6. Supprime les soumissions KYC (docs identité — RGPD : effacement)
+    prisma.kycSubmission.deleteMany({ where: { userId } }),
+  ]);
+
+  // Note : on garde volontairement intacts :
+  // - prisma.transaction (obligation BCEAO : 10 ans de rétention pour les paiements)
+  // - prisma.card (les cartes envoyées/reçues — le destinataire n'est pas un compte Donia souvent)
+  // - prisma.wallet (lié à la traçabilité financière, le solde n'est plus accessible)
+  // - prisma.referral (anonymisé via le tombstone du parrain, mais relation conservée)
+
+  res.json({ ok: true });
+});
+
 export default router;
