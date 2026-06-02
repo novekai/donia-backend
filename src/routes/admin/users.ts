@@ -102,4 +102,46 @@ router.get('/:id', async (req, res) => {
   res.json(user);
 });
 
+// POST /v1/admin/users/:id/credit-wallet — manually adjust a user's wallet.
+// Used for commercial gestures (Play Store screenshots, marketing gifts,
+// support compensation, etc.). Positive amount = credit, negative = debit.
+import { Prisma } from '@prisma/client';
+
+const creditSchema = z.object({
+  amount: z.coerce.number().refine((n) => n !== 0, 'amount must be non-zero'),
+  reason: z.string().min(2).max(200).default('admin adjustment'),
+});
+
+router.post('/:id/credit-wallet', validate(creditSchema), async (req, res) => {
+  const id = req.params.id as string;
+  const { amount, reason } = req.body as z.infer<typeof creditSchema>;
+
+  const user = await prisma.user.findUnique({ where: { id }, include: { wallet: true } });
+  if (!user || !user.wallet) throw NotFound('User or wallet not found');
+
+  await prisma.$transaction([
+    prisma.wallet.update({
+      where: { userId: id },
+      data: { balancePrincipal: { increment: new Prisma.Decimal(amount) } },
+    }),
+    prisma.transaction.create({
+      data: {
+        userId: id,
+        type: amount > 0 ? 'TOPUP_CODE' : 'WITHDRAWAL',
+        amount: new Prisma.Decimal(Math.abs(amount)),
+        status: 'SUCCESS',
+        metadata: { kind: 'admin_adjustment', reason, adjustedBy: req.admin?.email ?? 'unknown' },
+      },
+    }),
+  ]);
+
+  const updated = await prisma.wallet.findUnique({ where: { userId: id } });
+  res.json({
+    ok: true,
+    userId: id,
+    newBalance: Number(updated?.balancePrincipal ?? 0),
+    adjusted: amount,
+  });
+});
+
 export default router;
