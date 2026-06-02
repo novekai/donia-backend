@@ -1,0 +1,11 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+# First deploy : `prisma db push` syncs the schema directly without needing migration files.
+# Switch to `prisma migrate deploy` later once we have migration files committed.
+startCommand = "npx prisma db push --accept-data-loss && npm start"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+healthcheckPath = "/health"
+healthcheckTimeout = 60

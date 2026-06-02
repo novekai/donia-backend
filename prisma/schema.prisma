@@ -1,0 +1,464 @@
+// Donia — Prisma schema
+// Source de vérité pour le modèle de données. Migrations dans prisma/migrations/.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────── ENUMS ───────────────────────────
+
+enum Sex {
+  F
+  M
+  OTHER
+}
+
+enum KycStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum KycDocType {
+  CNI
+  PASSPORT
+  PERMIS
+}
+
+enum OtpChannel {
+  SMS
+  WHATSAPP
+  EMAIL
+}
+
+enum TxType {
+  SEND
+  RECEIVE
+  TOPUP_MOBILE_MONEY
+  TOPUP_CODE
+  WITHDRAWAL
+  COMMISSION
+  REFERRAL_BONUS
+  CAGNOTTE_IN
+}
+
+enum TxStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+enum CardStatus {
+  CREATED       // draft
+  SENT          // delivered to recipient
+  REDEEMED      // converted to money
+  EXPIRED
+  CANCELLED
+}
+
+enum DeliveryChannel {
+  WHATSAPP
+  EMAIL
+}
+
+enum CagnotteStatus {
+  ACTIVE
+  CLOSED
+  CANCELLED
+}
+
+enum AnonymousLinkStatus {
+  ACTIVE
+  SUSPENDED
+  ARCHIVED
+}
+
+enum AnonymousMessageStatus {
+  PENDING       // received, awaiting moderation
+  VALID         // visible to recipient
+  HIDDEN        // hidden by moderation (auto-flag)
+  REPORTED      // reported by recipient
+  DELETED       // recipient deleted it
+}
+
+enum AnonymousReportReason {
+  HARASSMENT
+  THREAT
+  SPAM
+  SEXUAL
+  HATE
+  OTHER
+}
+
+enum ArticleStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+// ─────────────────────────── USER ───────────────────────────
+
+model User {
+  id           String      @id @default(cuid())
+  phone        String      @unique                   // E.164 format e.g. +22990123456
+  email        String?     @unique
+  name         String
+  whatsapp     String?                                // E.164 — defaults to phone
+  sex          Sex?
+  dob          DateTime?   @db.Date
+  city         String?
+  country      String      @default("BJ")            // ISO 3166-1 alpha-2
+  passwordHash String
+  avatarUrl    String?                                 // R2 CDN URL of profile photo
+  kycStatus    KycStatus   @default(NONE)
+  emailVerified Boolean    @default(false)
+  phoneVerified Boolean    @default(false)
+  referralCode String      @unique                    // e.g. "AWA-2026"
+  referredBy   String?                                 // referralCode of parrain
+  birthdayOptIn Boolean    @default(true)             // appear in Fêtes list on birthday
+  deletedAt    DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  wallet            Wallet?
+  sessions          Session[]
+  otps              Otp[]
+  sentCards         Card[]                @relation("sender")
+  redeemedCards     Card[]                @relation("recipient")
+  transactions      Transaction[]
+  kycSubmissions    KycSubmission[]
+  cagnottes         Cagnotte[]            @relation("owner")
+  cagnotteContribs  CagnotteContribution[]
+  referralsAsParrain Referral[]           @relation("parrain")
+  referralsAsFilleul Referral[]           @relation("filleul")
+  notifications     Notification[]
+  anonymousLinks    AnonymousLink[]
+  expoPushTokens    ExpoPushToken[]
+
+  @@index([phone])
+  @@index([email])
+  @@index([referralCode])
+}
+
+// ─────────────────────────── AUTH ───────────────────────────
+
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  jtiHash    String   @unique                          // JWT ID hash
+  expiresAt  DateTime
+  ip         String?
+  userAgent  String?
+  revokedAt  DateTime?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Otp {
+  id          String     @id @default(cuid())
+  userId      String?                                 // null for pre-signup OTP
+  contact     String                                  // phone or email
+  channel     OtpChannel
+  codeHash    String
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  attempts    Int        @default(0)
+  createdAt   DateTime   @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([contact, channel])
+  @@index([expiresAt])
+}
+
+// ─────────────────────────── WALLET ───────────────────────────
+
+model Wallet {
+  userId            String   @id
+  balancePrincipal  Decimal  @default(0) @db.Decimal(14, 2)  // FCFA — main spendable
+  balanceReferral   Decimal  @default(0) @db.Decimal(14, 2)  // FCFA — from referrals
+  currency          String   @default("XOF")                  // CFA West African Franc
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// ─────────────────────────── CARDS ───────────────────────────
+
+model Card {
+  id                String           @id @default(cuid())
+  redeemCode        String           @unique                           // e.g. "DON-2026-A7K91"
+  senderId          String
+  recipientId       String?                                            // set when redeemed
+  recipientPhone    String                                             // E.164
+  recipientEmail    String?
+  recipientCountry  String           @default("BJ")
+  recipientName     String?
+  occasion          String           @default("bonjour")
+  themeKey          String           @default("anniversaire")          // see CARD_THEMES
+  amount            Decimal          @db.Decimal(14, 2)
+  message           String?
+  palette           String           @default("coral")
+  deliveryChannel   DeliveryChannel  @default(WHATSAPP)
+  commissionRate    Decimal          @default(0.05) @db.Decimal(5, 4)
+  status            CardStatus       @default(CREATED)
+  sentAt            DateTime?
+  redeemedAt        DateTime?
+  expiresAt         DateTime?                                          // optional expiry
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  sender    User           @relation("sender", fields: [senderId], references: [id])
+  recipient User?          @relation("recipient", fields: [recipientId], references: [id])
+  reactions CardReaction[]
+
+  @@index([senderId])
+  @@index([recipientId])
+  @@index([redeemCode])
+  @@index([recipientPhone])
+}
+
+model CardReaction {
+  id        String   @id @default(cuid())
+  cardId    String
+  userId    String
+  emoji     String                                    // ❤️ 🎉 🙏 😍 ✨
+  createdAt DateTime @default(now())
+
+  card Card @relation(fields: [cardId], references: [id], onDelete: Cascade)
+
+  @@unique([cardId, userId, emoji])
+  @@index([cardId])
+}
+
+// ─────────────────────────── TRANSACTIONS ───────────────────────────
+
+model Transaction {
+  id              String     @id @default(cuid())
+  userId          String
+  type            TxType
+  amount          Decimal    @db.Decimal(14, 2)
+  currency        String     @default("XOF")
+  status          TxStatus   @default(PENDING)
+  ref             String?    @unique                  // external ref (FedaPay tx id, etc.)
+  cardId          String?                              // related card if any
+  counterpartyId  String?                              // other user if any
+  metadata        Json?                                // free-form details
+  createdAt       DateTime   @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([type])
+  @@index([ref])
+}
+
+// ─────────────────────────── REFERRAL ───────────────────────────
+
+model Referral {
+  id           String   @id @default(cuid())
+  parrainId    String
+  filleulId    String   @unique                       // a user can only have one parrain
+  rate         Decimal  @default(0.01) @db.Decimal(5, 4)
+  totalEarned  Decimal  @default(0) @db.Decimal(14, 2)
+  createdAt    DateTime @default(now())
+
+  parrain User @relation("parrain", fields: [parrainId], references: [id])
+  filleul User @relation("filleul", fields: [filleulId], references: [id])
+
+  @@index([parrainId])
+}
+
+// ─────────────────────────── CAGNOTTE ───────────────────────────
+
+model Cagnotte {
+  id           String          @id @default(cuid())
+  ownerId      String
+  title        String
+  description  String?
+  goalAmount   Decimal         @db.Decimal(14, 2)
+  totalRaised  Decimal         @default(0) @db.Decimal(14, 2)
+  deadline     DateTime?
+  status       CagnotteStatus  @default(ACTIVE)
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  owner         User                   @relation("owner", fields: [ownerId], references: [id])
+  contributions CagnotteContribution[]
+
+  @@index([ownerId])
+  @@index([status])
+}
+
+model CagnotteContribution {
+  id            String   @id @default(cuid())
+  cagnotteId    String
+  contributorId String
+  amount        Decimal  @db.Decimal(14, 2)
+  message       String?
+  createdAt     DateTime @default(now())
+
+  cagnotte    Cagnotte @relation(fields: [cagnotteId], references: [id], onDelete: Cascade)
+  contributor User     @relation(fields: [contributorId], references: [id])
+
+  @@index([cagnotteId])
+}
+
+// ─────────────────────────── KYC ───────────────────────────
+
+model KycSubmission {
+  id           String      @id @default(cuid())
+  userId       String
+  docType      KycDocType
+  docUrlRecto  String                                  // signed URL to S3/R2
+  docUrlVerso  String?                                 // optional for passeport
+  status       KycStatus   @default(PENDING)
+  reviewedById String?
+  reviewedAt   DateTime?
+  rejectionReason String?
+  createdAt    DateTime    @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([status])
+}
+
+// ─────────────────────────── NOTIFICATIONS ───────────────────────────
+
+model Notification {
+  id         String   @id @default(cuid())
+  userId     String
+  type       String                                     // received_card, reaction, system, referral, etc.
+  title      String
+  body       String
+  emoji      String?
+  data       Json?
+  readAt     DateTime?
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([readAt])
+}
+
+// ─────────────────────────── ANONYMOUS LINKS (NGL-like) ───────────────────────────
+// User-owned shareable link that lets visitors send anonymous messages.
+model AnonymousLink {
+  id          String              @id @default(cuid())
+  userId      String
+  code        String              @unique                // short 7-char id, e.g. "xK3Jq9P"
+  prompt      String              @default("Dis-moi un secret 🤫")
+  theme       String              @default("indigo")    // visual gradient key
+  status      AnonymousLinkStatus @default(ACTIVE)
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  user     User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages AnonymousMessage[]
+
+  @@index([userId])
+  @@index([code])
+}
+
+// Single anonymous message addressed to an AnonymousLink owner.
+// senderIpHash, senderUserAgent are kept for moderation only (90-day retention).
+model AnonymousMessage {
+  id              String                  @id @default(cuid())
+  linkId          String
+  content         String                  @db.Text
+  senderIpHash    String?                                          // sha256(ip + salt)
+  senderUserAgent String?
+  senderEmail     String?                                          // captured for "Cercle" CRM (Phase 5)
+  status          AnonymousMessageStatus  @default(VALID)
+  moderationScore Decimal?                @db.Decimal(4, 3)        // 0..1 from auto moderation
+  isFavorite      Boolean                 @default(false)
+  reportReason    AnonymousReportReason?
+  reportedAt      DateTime?
+  readAt          DateTime?
+  deletedAt       DateTime?
+  createdAt       DateTime                @default(now())
+
+  link AnonymousLink @relation(fields: [linkId], references: [id], onDelete: Cascade)
+
+  @@index([linkId, createdAt])
+  @@index([status])
+}
+
+// ─────────────────────────── PLATFORM SETTINGS ───────────────────────────
+// Generic key/value store for editable platform-wide settings (commission %,
+// min card amount, max without KYC, etc.). Schema-less on purpose so we can
+// add new toggles without a migration.
+model PlatformSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+// ─────────────────────────── CARD TEMPLATES ───────────────────────────
+// Visual templates the user can choose when sending a card (themeKey is the
+// foreign reference used by Card.themeKey).
+model CardTemplate {
+  id          String   @id @default(cuid())
+  themeKey    String   @unique                   // e.g. "anniversaire", "noel"
+  name        String                              // display name "Anniversaire"
+  emoji       String                              // single emoji
+  color       String                              // hex bg "#F4486F"
+  ink         String   @default("#FDF7F6")        // hex text color on bg
+  category    String   @default("Famille · Fêtes")
+  isLive      Boolean  @default(true)             // visible in the mobile catalogue
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isLive, sortOrder])
+}
+
+// ─────────────────────────── BLOG ───────────────────────────
+// Articles published on doniia.com/#blog, managed from the back-office.
+model Article {
+  id           String         @id @default(cuid())
+  slug         String         @unique                          // URL-friendly id, e.g. "5-facons-anniversaire"
+  title        String
+  category     String                                          // e.g. "Conseil", "Témoignage", "Produit"
+  excerpt      String         @db.Text                         // 1-2 sentences shown on the cards
+  content      String         @db.Text                         // full body (plain text or markdown)
+  emoji        String                                          // single emoji shown on the cover
+  color        String                                          // hex like "#F4486F" for the cover bg
+  readMinutes  Int            @default(4)
+  author       String         @default("Équipe Donia")
+  status       ArticleStatus  @default(DRAFT)
+  publishedAt  DateTime?                                       // null while DRAFT
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@index([status, publishedAt])
+  @@index([slug])
+}
+
+// Expo Push tokens for sending mobile notifications (multiple devices per user supported).
+model ExpoPushToken {
+  id         String   @id @default(cuid())
+  userId     String
+  token      String   @unique                                       // ExponentPushToken[xxx]
+  platform   String                                                 // 'ios' | 'android'
+  deviceName String?
+  lastUsedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}

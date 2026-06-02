@@ -1,0 +1,64 @@
+// Admin settings — JSON key/value store backing the back-office Settings view.
+import { Router } from 'express';
+import { z } from 'zod';
+import { prisma } from '../../lib/prisma';
+import { requireAdmin } from '../../middleware/adminAuth';
+import { validate } from '../../middleware/validate';
+import { env } from '../../config/env';
+
+const router = Router();
+router.use(requireAdmin);
+
+// Default values applied when a key has never been set in DB.
+// Numbers are stored as numbers, booleans as booleans — typed JSON in Postgres.
+export const SETTING_DEFAULTS = {
+  commission_rate: 5,             // % taken on conversion
+  min_card_amount: 500,           // FCFA
+  max_amount_no_kyc: 50_000,      // FCFA
+  referral_lifetime_active: true,
+  channel_push: true,
+  channel_email: true,
+  channel_sms: true,
+  channel_whatsapp: true,
+} as const;
+
+type SettingKey = keyof typeof SETTING_DEFAULTS;
+type SettingValue = (typeof SETTING_DEFAULTS)[SettingKey];
+
+const KEYS = Object.keys(SETTING_DEFAULTS) as SettingKey[];
+
+// GET /v1/admin/settings — returns the merged DB + defaults map.
+router.get('/', async (_req, res) => {
+  const rows = await prisma.platformSetting.findMany({ where: { key: { in: KEYS } } });
+  const stored = new Map(rows.map((r) => [r.key, r.value as SettingValue]));
+  const settings: Record<SettingKey, SettingValue> = { ...SETTING_DEFAULTS };
+  for (const k of KEYS) {
+    if (stored.has(k)) settings[k] = stored.get(k) as SettingValue;
+  }
+  res.json({
+    settings,
+    admins: env.adminEmails,
+  });
+});
+
+const updateSchema = z.object({
+  value: z.union([z.number(), z.boolean(), z.string()]),
+});
+
+// PATCH /v1/admin/settings/:key
+router.patch('/:key', validate(updateSchema), async (req, res) => {
+  const key = req.params.key as string;
+  if (!KEYS.includes(key as SettingKey)) {
+    res.status(400).json({ error: { code: 'UNKNOWN_KEY', message: 'Unknown setting key' } });
+    return;
+  }
+  const { value } = req.body as z.infer<typeof updateSchema>;
+  const saved = await prisma.platformSetting.upsert({
+    where: { key },
+    update: { value },
+    create: { key, value },
+  });
+  res.json({ key: saved.key, value: saved.value });
+});
+
+export default router;
