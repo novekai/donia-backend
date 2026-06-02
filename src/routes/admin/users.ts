@@ -102,15 +102,43 @@ router.get('/:id', async (req, res) => {
   res.json(user);
 });
 
-// POST /v1/admin/users/:id/credit-wallet — manually adjust a user's wallet.
-// Used for commercial gestures (Play Store screenshots, marketing gifts,
-// support compensation, etc.). Positive amount = credit, negative = debit.
+// Manually adjust a user's wallet. Used for commercial gestures (Play Store
+// screenshots, marketing gifts, support compensation, etc.).
+// Positive amount = credit, negative = debit.
+//
+// Both endpoints below accept the same body: { amount, reason }.
+//   POST /v1/admin/users/:id/credit-wallet            ← lookup by Prisma id
+//   POST /v1/admin/users/by-identifier/credit-wallet  ← lookup by phone/email/name (easier)
 import { Prisma } from '@prisma/client';
 
 const creditSchema = z.object({
   amount: z.coerce.number().refine((n) => n !== 0, 'amount must be non-zero'),
   reason: z.string().min(2).max(200).default('admin adjustment'),
 });
+
+const creditByIdentifierSchema = creditSchema.extend({
+  identifier: z.string().min(2),
+});
+
+async function adjustWallet(userId: string, amount: number, reason: string, adjustedBy: string) {
+  await prisma.$transaction([
+    prisma.wallet.update({
+      where: { userId },
+      data: { balancePrincipal: { increment: new Prisma.Decimal(amount) } },
+    }),
+    prisma.transaction.create({
+      data: {
+        userId,
+        type: amount > 0 ? 'TOPUP_CODE' : 'WITHDRAWAL',
+        amount: new Prisma.Decimal(Math.abs(amount)),
+        status: 'SUCCESS',
+        metadata: { kind: 'admin_adjustment', reason, adjustedBy },
+      },
+    }),
+  ]);
+  const updated = await prisma.wallet.findUnique({ where: { userId } });
+  return Number(updated?.balancePrincipal ?? 0);
+}
 
 router.post('/:id/credit-wallet', validate(creditSchema), async (req, res) => {
   const id = req.params.id as string;
@@ -119,27 +147,35 @@ router.post('/:id/credit-wallet', validate(creditSchema), async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id }, include: { wallet: true } });
   if (!user || !user.wallet) throw NotFound('User or wallet not found');
 
-  await prisma.$transaction([
-    prisma.wallet.update({
-      where: { userId: id },
-      data: { balancePrincipal: { increment: new Prisma.Decimal(amount) } },
-    }),
-    prisma.transaction.create({
-      data: {
-        userId: id,
-        type: amount > 0 ? 'TOPUP_CODE' : 'WITHDRAWAL',
-        amount: new Prisma.Decimal(Math.abs(amount)),
-        status: 'SUCCESS',
-        metadata: { kind: 'admin_adjustment', reason, adjustedBy: req.admin?.email ?? 'unknown' },
-      },
-    }),
-  ]);
+  const newBalance = await adjustWallet(id, amount, reason, req.admin?.email ?? 'unknown');
+  res.json({ ok: true, userId: id, name: user.name, newBalance, adjusted: amount });
+});
 
-  const updated = await prisma.wallet.findUnique({ where: { userId: id } });
+router.post('/by-identifier/credit-wallet', validate(creditByIdentifierSchema), async (req, res) => {
+  const { identifier, amount, reason } = req.body as z.infer<typeof creditByIdentifierSchema>;
+  const term = identifier.trim();
+
+  const user = await prisma.user.findFirst({
+    where: {
+      deletedAt: null,
+      OR: [
+        { phone: term },
+        { email: term.toLowerCase() },
+        { name: { contains: term, mode: 'insensitive' } },
+        { referralCode: { equals: term.toUpperCase() } },
+      ],
+    },
+    include: { wallet: true },
+  });
+  if (!user || !user.wallet) throw NotFound(`Aucun utilisateur trouvé pour "${identifier}"`);
+
+  const newBalance = await adjustWallet(user.id, amount, reason, req.admin?.email ?? 'unknown');
   res.json({
     ok: true,
-    userId: id,
-    newBalance: Number(updated?.balancePrincipal ?? 0),
+    userId: user.id,
+    name: user.name,
+    phone: user.phone,
+    newBalance,
     adjusted: amount,
   });
 });
