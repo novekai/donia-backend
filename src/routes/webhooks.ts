@@ -24,19 +24,20 @@ router.post('/fedapay', async (req: Request, res: Response, next: NextFunction) 
       return res.status(401).json({ error: 'invalid signature' });
     }
 
-    // Parse the JSON now (after signature verification)
+    // Parse the JSON now (after signature verification).
+    // FedaPay payload shape: { name: "transaction.approved", object: "transaction", entity: {...} }
     const payload = JSON.parse(rawBody.toString('utf8')) as {
-      entity?: string;
       name?: string;
-      object?: FedapayTransaction;
+      object?: string;
+      entity?: FedapayTransaction;
     };
 
-    if (payload.entity !== 'transaction' || !payload.object) {
-      logger.info({ payload }, 'FedaPay webhook : event ignoré (non-transaction)');
+    if (payload.object !== 'transaction' || !payload.entity) {
+      logger.info({ name: payload.name, object: payload.object }, 'FedaPay webhook : event ignoré (non-transaction)');
       return res.json({ ok: true, ignored: true });
     }
 
-    const fedaTx = payload.object;
+    const fedaTx = payload.entity;
     const eventName = payload.name ?? '';
     const fedapayTxId = fedaTx.id;
 
