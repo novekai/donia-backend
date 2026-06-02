@@ -95,20 +95,58 @@ export async function getTransaction(transactionId: number): Promise<FedapayTran
 
 // ─────────────────────────── WEBHOOK SIGNATURE VERIFY ───────────────────────────
 
-// FedaPay signe les webhooks avec HMAC-SHA256 du raw body, en utilisant FEDAPAY_WEBHOOK_SECRET.
-// Le header (souvent `X-FedaPay-Signature` ou `x-fedapay-signature`) contient le hash hex.
+// FedaPay envoie une signature au format Stripe-style :
+//   X-FedaPay-Signature: t=<unix_seconds>,s=<hex_hmac_sha256>
+// La signature est calculée sur `<timestamp>.<raw_body>` avec FEDAPAY_WEBHOOK_SECRET.
+// Si le format simple (sans préfixe t=) arrive on accepte aussi en fallback.
+const MAX_AGE_SECONDS = 5 * 60; // reject anything older than 5 minutes (anti-replay)
+
 export function verifyWebhookSignature(rawBody: Buffer | string, signatureHeader: string | undefined): boolean {
   if (!env.FEDAPAY_WEBHOOK_SECRET) {
     logger.warn('FEDAPAY_WEBHOOK_SECRET not set — accepting webhook without verification (dev only)');
-    return env.isDev; // accept in dev, reject in prod
+    return env.isDev;
   }
   if (!signatureHeader) return false;
-  const expected = createHmac('sha256', env.FEDAPAY_WEBHOOK_SECRET).update(rawBody).digest('hex');
+
+  const bodyStr = typeof rawBody === 'string' ? rawBody : rawBody.toString('utf8');
+  const secret = env.FEDAPAY_WEBHOOK_SECRET;
+
+  // Parse t=…,s=… (comma-separated key=value). Fall back to raw signature if no t/s pair found.
+  const parts: Record<string, string> = {};
+  for (const seg of signatureHeader.split(',')) {
+    const [k, v] = seg.split('=');
+    if (k && v) parts[k.trim()] = v.trim();
+  }
+  const timestamp = parts.t;
+  const signature = parts.s;
+
+  // Candidate 1: Stripe-style "t.body"
+  if (timestamp && signature) {
+    const ageSec = Math.abs(Math.floor(Date.now() / 1000) - Number(timestamp));
+    if (Number.isFinite(ageSec) && ageSec > MAX_AGE_SECONDS) {
+      logger.warn({ ageSec }, 'FedaPay webhook : timestamp too old, rejecting');
+      return false;
+    }
+    if (constantTimeHexEqual(signature, hmacHex(secret, `${timestamp}.${bodyStr}`))) return true;
+    // Some integrations sign the body only, even with a t= prefix.
+    if (constantTimeHexEqual(signature, hmacHex(secret, bodyStr))) return true;
+    return false;
+  }
+
+  // Candidate 2: raw hex signature (legacy)
+  return constantTimeHexEqual(signatureHeader, hmacHex(secret, bodyStr));
+}
+
+function hmacHex(secret: string, payload: string): string {
+  return createHmac('sha256', secret).update(payload).digest('hex');
+}
+
+function constantTimeHexEqual(a: string, b: string): boolean {
   try {
-    const a = Buffer.from(expected, 'hex');
-    const b = Buffer.from(signatureHeader, 'hex');
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(a, b);
+    const ba = Buffer.from(a, 'hex');
+    const bb = Buffer.from(b, 'hex');
+    if (ba.length === 0 || ba.length !== bb.length) return false;
+    return timingSafeEqual(ba, bb);
   } catch {
     return false;
   }
