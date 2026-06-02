@@ -94,6 +94,39 @@ router.post('/topup/mobile-money', validate(topupMMSchema), async (req, res) => 
   }
 });
 
+// ── GET /v1/wallet/topup/code/:code/preview — look up a card without redeeming ──
+// Used by the mobile app so the user can see what they're about to redeem
+// (amount, commission, sender name) BEFORE tapping "Recharger".
+router.get('/topup/code/:code/preview', async (req, res) => {
+  if (!req.auth) throw Unauthorized();
+  const code = (req.params.code as string).toUpperCase().trim();
+  const card = await prisma.card.findUnique({
+    where: { redeemCode: code },
+    include: { sender: { select: { name: true } } },
+  });
+  if (!card) throw NotFound('Code invalide');
+  if (card.status === 'REDEEMED') throw BadRequest('Code déjà utilisé', 'ALREADY_REDEEMED');
+  if (card.status === 'CANCELLED' || card.status === 'EXPIRED') {
+    throw BadRequest(`Carte ${card.status === 'CANCELLED' ? 'annulée' : 'expirée'}`, 'CARD_INVALID');
+  }
+  if (card.status !== 'SENT') throw BadRequest('Carte non encore payée', 'CARD_NOT_READY');
+
+  const amount = Number(card.amount);
+  const commission = amount * Number(card.commissionRate);
+  const net = amount - commission;
+  res.json({
+    code: card.redeemCode,
+    amount,
+    commission,
+    commissionRate: Number(card.commissionRate),
+    net,
+    occasion: card.occasion,
+    themeKey: card.themeKey,
+    palette: card.palette,
+    senderName: card.sender?.name ?? 'Un proche',
+  });
+});
+
 // ── POST /v1/wallet/topup/code — enter a redeem code, credit balance ──
 const topupCodeSchema = z.object({ code: z.string() });
 
