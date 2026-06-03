@@ -5,6 +5,7 @@ import { prisma } from '../../lib/prisma';
 import { requireAdmin } from '../../middleware/adminAuth';
 import { validate } from '../../middleware/validate';
 import { NotFound } from '../../lib/errors';
+import { logger } from '../../lib/logger';
 import type { KycStatus } from '@prisma/client';
 
 const router = Router();
@@ -81,7 +82,7 @@ router.get('/', validate(listQuerySchema, 'query'), async (req, res) => {
   });
 });
 
-// GET /v1/admin/users/:id — full profile + wallet + counters
+// GET /v1/admin/users/:id — full profile + wallet + counters + recent activity
 router.get('/:id', async (req, res) => {
   const id = req.params.id as string;
   const user = await prisma.user.findUnique({
@@ -99,8 +100,116 @@ router.get('/:id', async (req, res) => {
     },
   });
   if (!user) throw NotFound('User not found');
-  res.json(user);
+
+  // Activity feed for the admin detail view: last transactions + cards + KYC + anonymous links
+  const [transactions, sentCards, kycSubmissions, anonymousLinks, referrals] = await Promise.all([
+    prisma.transaction.findMany({
+      where: { userId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+      select: { id: true, type: true, amount: true, status: true, createdAt: true, cardId: true, metadata: true },
+    }),
+    prisma.card.findMany({
+      where: { senderId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      select: {
+        id: true, redeemCode: true, recipientName: true, recipientPhone: true,
+        amount: true, occasion: true, status: true, deliveryChannel: true, createdAt: true,
+      },
+    }),
+    prisma.kycSubmission.findMany({
+      where: { userId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      select: { id: true, status: true, docType: true, createdAt: true, reviewedAt: true, rejectionReason: true },
+    }),
+    prisma.anonymousLink.findMany({
+      where: { userId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      select: { id: true, code: true, status: true, createdAt: true, _count: { select: { messages: true } } },
+    }),
+    prisma.referral.findMany({
+      where: { parrainId: id },
+      orderBy: { createdAt: 'desc' },
+      take: 10,
+      select: {
+        id: true, totalEarned: true, rate: true, createdAt: true,
+        filleul: { select: { id: true, name: true, phone: true, createdAt: true } },
+      },
+    }),
+  ]);
+
+  res.json({
+    ...user,
+    transactions,
+    sentCards,
+    kycSubmissions,
+    anonymousLinks,
+    referrals,
+  });
 });
+
+// DELETE /v1/admin/users/:id — RGPD soft-delete by admin
+// Anonymise les PII, révoque les sessions, supprime push tokens / OTPs / KYC,
+// archive les liens anonymes. Garde transactions + cards + wallet pour traçabilité BCEAO.
+import { Prisma } from '@prisma/client';
+
+router.delete('/:id', async (req, res) => {
+  const id = req.params.id as string;
+  const user = await prisma.user.findUnique({
+    where: { id },
+    select: { id: true, name: true, phone: true, deletedAt: true },
+  });
+  if (!user) throw NotFound('User not found');
+  if (user.deletedAt) {
+    return res.json({ ok: true, alreadyDeleted: true });
+  }
+
+  const tombstone = `deleted-${id}`;
+  const tombstoneEmail = `${tombstone}@deleted.donia.invalid`;
+  const tombstonePhone = `+0${id.slice(-12).padStart(12, '0')}`;
+  const tombstoneCode = `DELETED-${id.slice(-8).toUpperCase()}`;
+
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id },
+      data: {
+        deletedAt: new Date(),
+        name: 'Compte supprimé',
+        email: tombstoneEmail,
+        phone: tombstonePhone,
+        whatsapp: null,
+        avatarUrl: null,
+        sex: null,
+        dob: null,
+        city: null,
+        passwordHash: 'DELETED-ACCOUNT-NO-LOGIN',
+        referralCode: tombstoneCode,
+        birthdayOptIn: false,
+      },
+    }),
+    prisma.session.updateMany({
+      where: { userId: id, revokedAt: null },
+      data: { revokedAt: new Date() },
+    }),
+    prisma.expoPushToken.deleteMany({ where: { userId: id } }),
+    prisma.anonymousLink.updateMany({
+      where: { userId: id, status: { not: 'ARCHIVED' } },
+      data: { status: 'ARCHIVED' },
+    }),
+    prisma.otp.deleteMany({ where: { userId: id } }),
+    prisma.kycSubmission.deleteMany({ where: { userId: id } }),
+  ]);
+
+  logger.warn({ adminId: req.admin?.email, deletedUserId: id, deletedUserName: user.name, deletedUserPhone: user.phone }, '🗑️ User soft-deleted by admin');
+
+  res.json({ ok: true, userId: id });
+});
+
+// Avoid TS6133 — Prisma import is for future endpoints that need decimal types.
+void Prisma;
 
 
 export default router;
