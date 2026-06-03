@@ -278,7 +278,16 @@ router.post('/pay-mobile-money', validate(createSchema), async (req, res) => {
       prisma.transaction.update({ where: { id: localTx.id }, data: { status: 'FAILED' } }),
       prisma.card.update({ where: { id: card.id }, data: { status: 'CANCELLED' } }),
     ]);
-    throw BadRequest('Impossible de démarrer le paiement Mobile Money', 'PAYMENT_INIT_FAILED');
+
+    // Surface the real FedaPay error message to the mobile client so the user understands.
+    // Without this, axios collapses 400s into "Network Error" or generic messages.
+    type AxiosLikeErr = { response?: { data?: { message?: string; error?: string } } };
+    const ax = e as AxiosLikeErr;
+    const fedapayMsg = ax.response?.data?.message ?? ax.response?.data?.error;
+    const userMessage = fedapayMsg
+      ? `Paiement refusé par FedaPay : ${fedapayMsg}`
+      : 'Impossible de démarrer le paiement Mobile Money. Réessaie dans quelques minutes.';
+    throw BadRequest(userMessage, 'PAYMENT_INIT_FAILED');
   }
 });
 
