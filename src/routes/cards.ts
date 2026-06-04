@@ -292,17 +292,43 @@ router.post('/pay-mobile-money', validate(createSchema), async (req, res) => {
 });
 
 // ── Get one card (sender or recipient access) ──
+// Le destinataire voit les infos du sender SELON les préférences de confidentialité
+// du sender (showPhonePublic, showEmailPublic, showAvatarPublic). Le sender lui-même
+// voit toujours ses propres infos en clair.
 router.get('/:id', async (req, res) => {
   if (!req.auth) throw Unauthorized();
   const card = await prisma.card.findUnique({
     where: { id: req.params.id },
-    include: { reactions: true },
+    include: {
+      reactions: true,
+      sender: {
+        select: {
+          id: true, name: true, avatarUrl: true,
+          phone: true, email: true, whatsapp: true,
+          showPhonePublic: true, showEmailPublic: true, showAvatarPublic: true,
+        },
+      },
+    },
   });
   if (!card) throw NotFound();
   if (card.senderId !== req.auth.userId && card.recipientId !== req.auth.userId) {
     throw Forbidden('Not your card');
   }
-  res.json({ card });
+  const viewerIsSender = card.senderId === req.auth.userId;
+  const s = card.sender;
+  const senderPublic = s
+    ? {
+        id: s.id,
+        name: s.name,
+        // Si le viewer est le sender, on lui rend tout. Sinon on filtre selon ses préférences.
+        avatarUrl: viewerIsSender || s.showAvatarPublic ? s.avatarUrl : null,
+        phone: viewerIsSender || s.showPhonePublic ? s.phone : null,
+        whatsapp: viewerIsSender || s.showPhonePublic ? s.whatsapp : null,
+        email: viewerIsSender || s.showEmailPublic ? s.email : null,
+      }
+    : null;
+  const { sender: _omit, ...cardOut } = card;
+  res.json({ card: { ...cardOut, sender: senderPublic } });
 });
 
 // ── Redeem a card (any authenticated user who knows the code) ──

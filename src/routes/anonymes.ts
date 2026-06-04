@@ -125,7 +125,9 @@ router.post('/links/:id/suspend', async (req, res) => {
 });
 
 // ── GET /v1/anonymes/messages — lister mes messages reçus (sur tous mes liens) ──
+// Si ?linkId=… est fourni, filtre sur ce lien précis (et vérifie qu'il appartient au user).
 const listMessagesSchema = z.object({
+  linkId: z.string().optional(),
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(50).optional(),
 });
@@ -141,9 +143,16 @@ router.get('/messages', validate(listMessagesSchema, 'query'), async (req, res) 
   });
   const linkIds = myLinks.map((l) => l.id);
 
+  // Si on demande un lien précis, vérifier qu'il fait partie de ceux du user.
+  if (q.linkId && !linkIds.includes(q.linkId)) {
+    res.json({ items: [], nextCursor: null });
+    return;
+  }
+  const linkFilter = q.linkId ? [q.linkId] : linkIds;
+
   const items = await prisma.anonymousMessage.findMany({
     where: {
-      linkId: { in: linkIds },
+      linkId: { in: linkFilter },
       status: 'VALID',
     },
     orderBy: { createdAt: 'desc' },

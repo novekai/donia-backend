@@ -1,0 +1,5 @@
+ALTER TABLE "User"
+  ADD COLUMN "birthdayPublic" BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN "notifPushEnabled" BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN "notifEmailEnabled" BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN "notifWhatsAppEnabled" BOOLEAN NOT NULL DEFAULT true;

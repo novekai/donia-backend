@@ -27,8 +27,10 @@ const meSelect = {
   kycStatus: true, emailVerified: true, phoneVerified: true,
   referralCode: true, referredBy: true,
   birthdayOptIn: true,
+  birthdayPublic: true,
   showEmailPublic: true, showPhonePublic: true, showAvatarPublic: true,
   preferredLanguage: true,
+  notifPushEnabled: true, notifEmailEnabled: true, notifWhatsAppEnabled: true,
   createdAt: true,
   wallet: { select: { balancePrincipal: true, balanceReferral: true, currency: true } },
 } as const;
@@ -49,12 +51,17 @@ const patchSchema = z.object({
   city: z.string().optional(),
   country: z.string().length(2).optional(),
   birthdayOptIn: z.boolean().optional(),
+  birthdayPublic: z.boolean().optional(),
   // Confidentialité
   showEmailPublic: z.boolean().optional(),
   showPhonePublic: z.boolean().optional(),
   showAvatarPublic: z.boolean().optional(),
   // Langue préférée (BCP 47)
   preferredLanguage: z.enum(['fr-FR', 'en-US']).optional(),
+  // Préférences notifications
+  notifPushEnabled: z.boolean().optional(),
+  notifEmailEnabled: z.boolean().optional(),
+  notifWhatsAppEnabled: z.boolean().optional(),
 }).strict();
 
 router.patch('/', validate(patchSchema), async (req, res) => {

@@ -122,12 +122,17 @@ model User {
   phoneVerified Boolean    @default(false)
   referralCode String      @unique                    // e.g. "AWA-2026"
   referredBy   String?                                 // referralCode of parrain
-  birthdayOptIn Boolean    @default(true)             // appear in Fêtes list on birthday
+  birthdayOptIn Boolean    @default(true)             // recevoir des rappels d'anniversaire de ses proches
+  birthdayPublic Boolean   @default(false)           // afficher publiquement "C'est mon anniv" le jour J + recevoir des cartes spontanées
   // Confidentialité — qui peut voir mon email/téléphone/avatar quand un proche cherche par numéro
   showEmailPublic    Boolean @default(false)         // affiché aux destinataires de mes cartes
   showPhonePublic    Boolean @default(true)          // visible aux contacts (E.164 sans masque)
   showAvatarPublic   Boolean @default(true)          // photo visible sur fiche destinataire
   preferredLanguage  String  @default("fr-FR")       // BCP 47 — fr-FR par défaut
+  // Préférences de notifications — granularité par canal
+  notifPushEnabled     Boolean @default(true)        // push system (Expo)
+  notifEmailEnabled    Boolean @default(true)        // emails transactionnels + récap
+  notifWhatsAppEnabled Boolean @default(true)        // notifs WhatsApp (cartes reçues, etc.)
   deletedAt    DateTime?
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
