@@ -62,6 +62,20 @@ export async function deleteObject(key: string): Promise<void> {
   }
 }
 
+// Upload a KYC document — preserves text legibility (max 1600px on long side,
+// JPEG q=88 — heavier than avatars but still ~200-400KB per page).
+// Path: kyc/<userId>/<random>-<side>.jpg
+export async function uploadKycDoc(userId: string, side: 'recto' | 'verso', input: Buffer): Promise<string> {
+  const optimized = await sharp(input)
+    .rotate()
+    .resize(1600, 1600, { fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 88, mozjpeg: true })
+    .toBuffer();
+
+  const key = `kyc/${userId}/${randomUUID()}-${side}.jpg`;
+  return uploadBuffer(optimized, key, 'image/jpeg', 'private, no-store');
+}
+
 // Upload a user avatar — resizes to 512px square WebP, returns the public URL.
 // We keep a single size for now (512px); the app/web can downscale as needed.
 export async function uploadAvatar(userId: string, input: Buffer): Promise<string> {

@@ -1,6 +1,7 @@
 // GET /v1/me — profile + wallet + KYC status
 // PATCH /v1/me — update profile fields
 // POST /v1/me/avatar — upload profile photo (multipart) → R2 → save URL
+// POST /v1/me/password — change password (knowing the current one)
 import { Router } from 'express';
 import multer from 'multer';
 import { z } from 'zod';
@@ -9,6 +10,7 @@ import { validate } from '../middleware/validate';
 import { prisma } from '../lib/prisma';
 import { BadRequest, NotFound, Unauthorized } from '../lib/errors';
 import { uploadAvatar } from '../services/r2';
+import { hashPassword, verifyPassword } from '../lib/password';
 
 const router = Router();
 router.use(requireAuth);
@@ -91,6 +93,37 @@ router.delete('/avatar', async (req, res) => {
     select: meSelect,
   });
   res.json({ user });
+});
+
+// POST /v1/me/password — change password en connaissant le mot de passe actuel.
+// Si on veut RESET (a oublié le mot de passe), c'est l'endpoint POST /auth/reset-password
+// avec un OTP par WhatsApp/Email (cf. routes/auth.ts).
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: z.string().min(8),
+});
+
+router.post('/password', validate(changePasswordSchema), async (req, res) => {
+  if (!req.auth) throw Unauthorized();
+  const { currentPassword, newPassword } = req.body as z.infer<typeof changePasswordSchema>;
+
+  const user = await prisma.user.findUnique({
+    where: { id: req.auth.userId },
+    select: { passwordHash: true },
+  });
+  if (!user) throw NotFound('User not found');
+
+  const ok = await verifyPassword(currentPassword, user.passwordHash);
+  if (!ok) throw Unauthorized('Mot de passe actuel incorrect');
+
+  if (currentPassword === newPassword) {
+    throw BadRequest('Le nouveau mot de passe doit être différent de l\'ancien');
+  }
+
+  const passwordHash = await hashPassword(newPassword);
+  await prisma.user.update({ where: { id: req.auth.userId }, data: { passwordHash } });
+
+  res.json({ ok: true });
 });
 
 // GET /v1/me/sessions — liste des sessions actives (non révoquées + non expirées)

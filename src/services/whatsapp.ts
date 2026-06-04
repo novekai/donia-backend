@@ -21,6 +21,29 @@ export function phoneToChatId(phoneE164: string): string | null {
 type SendTextOk = { id: string };
 
 /**
+ * Pour les numéros béninois (+229), certains comptes WhatsApp sont enregistrés
+ * sous l'ancien format à 8 chiffres (sans le préfixe 01 ajouté en 2021), d'autres
+ * sous le nouveau format à 10 chiffres avec le 01. WAHA renvoie une erreur
+ * spécifique quand le chatId n'existe pas comme compte WhatsApp.
+ *
+ * Cette fonction retourne une variante alternative à essayer en cas d'échec :
+ * - +22901XXXXXXXX (10 chiffres locaux) → +229XXXXXXXX (en retirant le 01)
+ * - +229XXXXXXXX (8 chiffres locaux) → +22901XXXXXXXX (en ajoutant le 01)
+ * Pour les autres pays, renvoie null (pas de retry).
+ */
+export function beninRetryVariant(phoneE164: string): string | null {
+  if (!phoneE164.startsWith('+229')) return null;
+  const local = phoneE164.slice(4).replace(/\D/g, '');
+  if (local.startsWith('01') && local.length === 10) {
+    return `+229${local.slice(2)}`;
+  }
+  if (local.length === 8) {
+    return `+22901${local}`;
+  }
+  return null;
+}
+
+/**
  * Send a plain-text WhatsApp message via WAHA.
  * Returns the WAHA message id on success. Throws on failure (caller handles fallback).
  */

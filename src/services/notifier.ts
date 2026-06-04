@@ -5,7 +5,7 @@ import { Resend } from 'resend';
 import { logger } from '../lib/logger';
 import { env } from '../config/env';
 import { otpEmailTemplate, cardReceivedTemplate } from './email-templates';
-import { sendWhatsAppText } from './whatsapp';
+import { sendWhatsAppText, beninRetryVariant } from './whatsapp';
 import { whatsAppOtp, whatsAppCardDelivery } from './whatsapp-templates';
 
 type Channel = 'SMS' | 'WHATSAPP' | 'EMAIL';
@@ -44,8 +44,18 @@ export async function sendOtp(contact: string, channel: Channel, code: string): 
 
   if (channel === 'WHATSAPP') {
     const text = whatsAppOtp({ code, expiresInMinutes: env.OTP_TTL_MINUTES });
-    await sendWhatsAppText(contact, text);
-    return;
+    // 1ère tentative avec le numéro tel quel
+    try {
+      await sendWhatsAppText(contact, text);
+      return;
+    } catch (e) {
+      // 2e tentative : pour les numéros béninois, retire ou ajoute le 01 (cf. beninRetryVariant)
+      const alt = beninRetryVariant(contact);
+      if (!alt) throw e;
+      logger.warn({ contact, alt, reason: (e as Error).message }, '🔁 WAHA retry on Benin number variant');
+      await sendWhatsAppText(alt, text);
+      return;
+    }
   }
 
   // SMS is disabled platform-wide. Log in dev for debugging, reject in prod.
