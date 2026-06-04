@@ -25,6 +25,8 @@ const meSelect = {
   kycStatus: true, emailVerified: true, phoneVerified: true,
   referralCode: true, referredBy: true,
   birthdayOptIn: true,
+  showEmailPublic: true, showPhonePublic: true, showAvatarPublic: true,
+  preferredLanguage: true,
   createdAt: true,
   wallet: { select: { balancePrincipal: true, balanceReferral: true, currency: true } },
 } as const;
@@ -45,6 +47,12 @@ const patchSchema = z.object({
   city: z.string().optional(),
   country: z.string().length(2).optional(),
   birthdayOptIn: z.boolean().optional(),
+  // Confidentialité
+  showEmailPublic: z.boolean().optional(),
+  showPhonePublic: z.boolean().optional(),
+  showAvatarPublic: z.boolean().optional(),
+  // Langue préférée (BCP 47)
+  preferredLanguage: z.enum(['fr-FR', 'en-US']).optional(),
 }).strict();
 
 router.patch('/', validate(patchSchema), async (req, res) => {
@@ -83,6 +91,61 @@ router.delete('/avatar', async (req, res) => {
     select: meSelect,
   });
   res.json({ user });
+});
+
+// GET /v1/me/sessions — liste des sessions actives (non révoquées + non expirées)
+// Sert l'écran "Sessions récentes" + "Appareils connectés" côté mobile.
+router.get('/sessions', async (req, res) => {
+  if (!req.auth) throw Unauthorized();
+  const sessions = await prisma.session.findMany({
+    where: { userId: req.auth.userId, revokedAt: null, expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, ip: true, userAgent: true, createdAt: true, expiresAt: true, jtiHash: true },
+    take: 50,
+  });
+  // Marque la session courante (pour que le mobile la mette en évidence et empêche sa révocation).
+  const currentJtiHash = req.auth.jti ? Buffer.from(req.auth.jti).toString('base64') : null;
+  res.json({
+    sessions: sessions.map((s) => ({
+      id: s.id,
+      ip: s.ip,
+      userAgent: s.userAgent,
+      createdAt: s.createdAt,
+      expiresAt: s.expiresAt,
+      isCurrent: currentJtiHash !== null && s.jtiHash.includes(currentJtiHash.slice(0, 12)),
+    })),
+  });
+});
+
+// POST /v1/me/sessions/:id/revoke — révoque une session spécifique (déconnexion à distance).
+router.post('/sessions/:id/revoke', async (req, res) => {
+  if (!req.auth) throw Unauthorized();
+  const id = req.params.id;
+  const session = await prisma.session.findUnique({ where: { id }, select: { userId: true, revokedAt: true } });
+  if (!session) throw NotFound('Session not found');
+  if (session.userId !== req.auth.userId) throw Unauthorized('Not your session');
+  if (session.revokedAt) return res.json({ ok: true, alreadyRevoked: true });
+  await prisma.session.update({ where: { id }, data: { revokedAt: new Date() } });
+  res.json({ ok: true });
+});
+
+// POST /v1/me/sessions/revoke-all — révoque toutes les sessions SAUF la courante.
+// Utile si l'utilisateur veut se déconnecter de tous ses autres appareils.
+router.post('/sessions/revoke-all', async (req, res) => {
+  if (!req.auth) throw Unauthorized();
+  const all = await prisma.session.findMany({
+    where: { userId: req.auth.userId, revokedAt: null },
+    select: { id: true, jtiHash: true },
+  });
+  const currentJtiHash = req.auth.jti ? Buffer.from(req.auth.jti).toString('base64') : null;
+  const toRevoke = all.filter((s) =>
+    !(currentJtiHash !== null && s.jtiHash.includes(currentJtiHash.slice(0, 12))),
+  );
+  await prisma.session.updateMany({
+    where: { id: { in: toRevoke.map((s) => s.id) } },
+    data: { revokedAt: new Date() },
+  });
+  res.json({ ok: true, revoked: toRevoke.length });
 });
 
 // DELETE /v1/me — RGPD account deletion.

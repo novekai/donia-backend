@@ -123,6 +123,11 @@ model User {
   referralCode String      @unique                    // e.g. "AWA-2026"
   referredBy   String?                                 // referralCode of parrain
   birthdayOptIn Boolean    @default(true)             // appear in Fêtes list on birthday
+  // Confidentialité — qui peut voir mon email/téléphone/avatar quand un proche cherche par numéro
+  showEmailPublic    Boolean @default(false)         // affiché aux destinataires de mes cartes
+  showPhonePublic    Boolean @default(true)          // visible aux contacts (E.164 sans masque)
+  showAvatarPublic   Boolean @default(true)          // photo visible sur fiche destinataire
+  preferredLanguage  String  @default("fr-FR")       // BCP 47 — fr-FR par défaut
   deletedAt    DateTime?
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
