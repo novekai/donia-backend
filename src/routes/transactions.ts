@@ -11,6 +11,7 @@ router.use(requireAuth);
 
 const querySchema = z.object({
   type: z.enum(['SEND', 'RECEIVE', 'TOPUP_MOBILE_MONEY', 'TOPUP_CODE', 'WITHDRAWAL', 'COMMISSION', 'REFERRAL_BONUS', 'CAGNOTTE_IN']).optional(),
+  status: z.enum(['PENDING', 'SUCCESS', 'FAILED', 'REFUNDED']).optional(),
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
@@ -23,6 +24,7 @@ router.get('/', validate(querySchema, 'query'), async (req, res) => {
     where: {
       userId: req.auth.userId,
       ...(q.type ? { type: q.type } : {}),
+      ...(q.status ? { status: q.status } : {}),
     },
     orderBy: { createdAt: 'desc' },
     take: q.limit + 1,
