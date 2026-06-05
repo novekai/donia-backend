@@ -93,40 +93,133 @@ async function issueSession(
 
 // ── Routes ───────────────────────────────────────────────────────────
 
+// POST /v1/auth/signup — étape 1 : crée une PendingSignup + envoie l'OTP WhatsApp.
+// Le compte User n'est PAS créé à ce stade. Il sera créé seulement après que
+// l'utilisateur ait validé l'OTP via POST /v1/auth/signup/confirm.
+// Anti-doublon : si un User existe déjà avec ce phone/email → refuse.
+// Si un PendingSignup existe déjà avec ce phone → on l'upsert (renvoie un nouvel OTP).
 router.post('/signup', validate(signupSchema), async (req, res) => {
   const body = req.body as z.infer<typeof signupSchema>;
 
   const existing = await prisma.user.findFirst({
     where: { OR: [{ phone: body.phone }, ...(body.email ? [{ email: body.email }] : [])] },
-    select: { id: true },
+    select: { id: true, deletedAt: true },
   });
-  if (existing) throw Conflict('A user with this phone/email already exists');
+  if (existing && !existing.deletedAt) throw Conflict('Un compte existe déjà avec ce numéro ou cet email.');
 
   const passwordHash = await hashPassword(body.password);
-  const referralCode = await uniqueReferralCode(body.name);
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60_000); // 24h pour confirmer
 
-  const user = await prisma.user.create({
-    data: {
-      name: body.name,
-      phone: body.phone,
+  await prisma.pendingSignup.upsert({
+    where: { phone: body.phone },
+    update: {
       email: body.email ?? null,
       whatsapp: body.whatsapp ?? body.phone,
+      name: body.name,
+      passwordHash,
       sex: body.sex ?? null,
       dob: body.dob ? new Date(body.dob) : null,
       city: body.city ?? null,
       country: body.country,
-      passwordHash,
-      referralCode,
       referredBy: body.referredBy ?? null,
+      deviceName: body.deviceName ?? null,
+      expiresAt,
+    },
+    create: {
+      phone: body.phone,
+      email: body.email ?? null,
+      whatsapp: body.whatsapp ?? body.phone,
+      name: body.name,
+      passwordHash,
+      sex: body.sex ?? null,
+      dob: body.dob ? new Date(body.dob) : null,
+      city: body.city ?? null,
+      country: body.country,
+      referredBy: body.referredBy ?? null,
+      deviceName: body.deviceName ?? null,
+      expiresAt,
+    },
+  });
+
+  // Envoie l'OTP sur le WhatsApp du futur compte. L'OTP est lié au contact (whatsapp).
+  const target = body.whatsapp ?? body.phone;
+  const code = generateOtp(env.OTP_CODE_LENGTH);
+  await prisma.otp.create({
+    data: {
+      contact: target,
+      channel: 'WHATSAPP',
+      codeHash: sha256(code),
+      expiresAt: new Date(Date.now() + env.OTP_TTL_MINUTES * 60_000),
+    },
+  });
+  try {
+    await sendOtp(target, 'WHATSAPP', code);
+  } catch (e) {
+    // L'OTP est créé, l'utilisateur peut renvoyer. Mais on remonte l'erreur pour qu'il
+    // sache que le WhatsApp ne marche pas (mauvais numéro, pas de compte WA, etc).
+    throw BadRequest((e as Error).message);
+  }
+
+  res.status(202).json({ ok: true, pendingPhone: body.phone, otpTarget: target });
+});
+
+// POST /v1/auth/signup/confirm — étape 2 : valide l'OTP et crée le vrai User.
+// Body : { phone, code, channel? (default WHATSAPP) }
+// Si pas d'OTP valide → 401. Si pas de PendingSignup → 404 (probablement expiré).
+const confirmSchema = z.object({
+  phone: phoneSchema,
+  code: z.string(),
+});
+
+router.post('/signup/confirm', validate(confirmSchema), async (req, res) => {
+  const { phone, code } = req.body as z.infer<typeof confirmSchema>;
+
+  const pending = await prisma.pendingSignup.findUnique({ where: { phone } });
+  if (!pending) throw NotFound('Aucune inscription en cours pour ce numéro. Refais ton inscription.');
+  if (pending.expiresAt < new Date()) {
+    await prisma.pendingSignup.delete({ where: { phone } });
+    throw BadRequest("Ton inscription a expiré. Refais ton inscription.");
+  }
+
+  // Vérifie l'OTP (envoyé sur le whatsapp = même target que dans /signup)
+  const target = pending.whatsapp ?? pending.phone;
+  const otp = await prisma.otp.findFirst({
+    where: { contact: target, channel: 'WHATSAPP', consumedAt: null, expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: 'desc' },
+  });
+  if (!otp) throw Unauthorized('Code expiré ou introuvable. Demande un nouveau code.');
+  if (otp.attempts >= 5) throw BadRequest('Trop de tentatives sur ce code. Demande un nouveau.');
+  if (otp.codeHash !== sha256(code)) {
+    await prisma.otp.update({ where: { id: otp.id }, data: { attempts: { increment: 1 } } });
+    throw Unauthorized('Code incorrect.');
+  }
+  await prisma.otp.update({ where: { id: otp.id }, data: { consumedAt: new Date() } });
+
+  // OK → on crée le vrai compte
+  const referralCode = await uniqueReferralCode(pending.name);
+  const user = await prisma.user.create({
+    data: {
+      name: pending.name,
+      phone: pending.phone,
+      email: pending.email,
+      whatsapp: pending.whatsapp ?? pending.phone,
+      sex: pending.sex,
+      dob: pending.dob,
+      city: pending.city,
+      country: pending.country,
+      passwordHash: pending.passwordHash,
+      phoneVerified: true,                              // validé via OTP WhatsApp
+      referralCode,
+      referredBy: pending.referredBy,
       wallet: { create: {} },
     },
     select: { id: true, name: true, phone: true, email: true, referralCode: true, createdAt: true },
   });
 
-  // Create referral link if parrain provided + notify the parrain in-app.
-  if (body.referredBy) {
+  // Parrainage si applicable
+  if (pending.referredBy) {
     const parrain = await prisma.user.findUnique({
-      where: { referralCode: body.referredBy },
+      where: { referralCode: pending.referredBy },
       select: { id: true },
     });
     if (parrain) {
@@ -137,12 +230,10 @@ router.post('/signup', validate(signupSchema), async (req, res) => {
         const firstName = user.name.split(' ')[0];
         await prisma.notification.create({
           data: {
-            userId: parrain.id,
-            type: 'new_filleul',
+            userId: parrain.id, type: 'new_filleul',
             title: 'Nouveau filleul 🎉',
             body: `${firstName} vient de rejoindre Donia grâce à toi.`,
-            emoji: '🤝',
-            data: { filleulId: user.id },
+            emoji: '🤝', data: { filleulId: user.id },
           },
         });
         await sendExpoPush({
@@ -151,13 +242,15 @@ router.post('/signup', validate(signupSchema), async (req, res) => {
           body: `${firstName} vient de rejoindre Donia grâce à toi.`,
           data: { type: 'new_filleul', filleulId: user.id },
         });
-      } catch {
-        // best-effort
-      }
+      } catch {}
     }
   }
 
-  const session = await issueSession(user.id, req, body.deviceName);
+  // Nettoie le PendingSignup
+  await prisma.pendingSignup.delete({ where: { phone } });
+
+  // Émet la session
+  const session = await issueSession(user.id, req, pending.deviceName);
   res.status(201).json({ user, token: session.token, expiresAt: session.expiresAt });
 });
 

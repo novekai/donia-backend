@@ -5,7 +5,7 @@ import { Resend } from 'resend';
 import { logger } from '../lib/logger';
 import { env } from '../config/env';
 import { otpEmailTemplate, cardReceivedTemplate } from './email-templates';
-import { sendWhatsAppText, resolveWhatsAppNumber } from './whatsapp';
+import { sendWhatsAppText, resolveWhatsAppNumber, beninRetryVariant } from './whatsapp';
 import { whatsAppOtp, whatsAppCardDelivery } from './whatsapp-templates';
 
 type Channel = 'SMS' | 'WHATSAPP' | 'EMAIL';
@@ -44,17 +44,31 @@ export async function sendOtp(contact: string, channel: Channel, code: string): 
 
   if (channel === 'WHATSAPP') {
     const text = whatsAppOtp({ code, expiresInMinutes: env.OTP_TTL_MINUTES });
-    // 1. Résoudre le bon format du numéro (Bénin : on bascule entre +229XXXXXXXX
-    //    et +22901XXXXXXXX selon ce qui a un compte WhatsApp actif).
+    // 1. Tente d'abord le format préféré via resolveWhatsAppNumber (qui interroge WAHA
+    //    check-exists si disponible et bascule sur la variante 229 avec/sans 01).
     const resolved = await resolveWhatsAppNumber(contact);
-    if (!resolved) {
-      // Aucun des formats n'a de compte WhatsApp → message clair pour le user.
-      throw new Error(
-        `Ce numéro (${contact}) n'a pas de compte WhatsApp actif. Vérifie que tu utilises bien le numéro associé à ton WhatsApp, ou utilise le canal Email.`,
-      );
+    const candidates: string[] = [];
+    if (resolved) candidates.push(resolved);
+    if (resolved !== contact) candidates.push(contact);                    // fallback : tente le numéro tel quel
+    const variant = beninRetryVariant(contact);
+    if (variant && !candidates.includes(variant)) candidates.push(variant); // fallback : variante 01
+
+    let lastErr: Error | null = null;
+    for (const phone of candidates) {
+      try {
+        await sendWhatsAppText(phone, text);
+        if (phone !== contact) {
+          logger.info({ original: contact, used: phone }, '✅ WhatsApp delivered via fallback variant');
+        }
+        return;
+      } catch (e) {
+        lastErr = e as Error;
+        logger.warn({ phone, error: lastErr.message }, '⚠️ WhatsApp send failed, trying next variant');
+      }
     }
-    await sendWhatsAppText(resolved, text);
-    return;
+    throw new Error(
+      `Ce numéro (${contact}) n'a pas de compte WhatsApp actif. Vérifie ton numéro WhatsApp ou utilise le canal Email. (${lastErr?.message ?? 'unknown'})`,
+    );
   }
 
   // SMS is disabled platform-wide. Log in dev for debugging, reject in prod.

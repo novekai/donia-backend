@@ -159,6 +159,28 @@ model User {
 
 // ─────────────────────────── AUTH ───────────────────────────
 
+// PendingSignup — stocke temporairement les infos de signup en attente
+// de validation OTP. Le compte User n'est créé qu'après vérification du code.
+// Anti-spam : 1 entrée par phone (upsert), TTL automatique par expiresAt.
+model PendingSignup {
+  id           String   @id @default(cuid())
+  phone        String   @unique
+  email        String?
+  whatsapp     String?
+  name         String
+  passwordHash String
+  sex          Sex?
+  dob          DateTime?
+  city         String?
+  country      String   @default("BJ")
+  referredBy   String?
+  deviceName   String?
+  expiresAt    DateTime                  // ~24h après création
+  createdAt    DateTime @default(now())
+
+  @@index([expiresAt])
+}
+
 model Session {
   id         String   @id @default(cuid())
   userId     String
