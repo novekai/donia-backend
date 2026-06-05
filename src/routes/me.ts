@@ -42,12 +42,14 @@ router.get('/', async (req, res) => {
   res.json({ user });
 });
 
+// Note : dob VOLONTAIREMENT exclue du patch. La date de naissance est verrouillée
+// après l'inscription pour éviter les triches (compter sur son anniv pour recevoir
+// des cartes spontanées, jouer avec les filtres KYC, etc.).
 const patchSchema = z.object({
   name: z.string().min(2).optional(),
   whatsapp: z.string().regex(/^\+\d{8,15}$/).optional(),
   email: z.string().email().optional(),
   sex: z.enum(['F', 'M', 'OTHER']).optional(),
-  dob: z.string().date().optional(),
   city: z.string().optional(),
   country: z.string().length(2).optional(),
   birthdayOptIn: z.boolean().optional(),
@@ -69,7 +71,7 @@ router.patch('/', validate(patchSchema), async (req, res) => {
   const body = req.body as z.infer<typeof patchSchema>;
   const user = await prisma.user.update({
     where: { id: req.auth.userId },
-    data: { ...body, dob: body.dob ? new Date(body.dob) : undefined },
+    data: body,
     select: meSelect,
   });
   res.json({ user });
