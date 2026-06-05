@@ -5,7 +5,7 @@ import { Resend } from 'resend';
 import { logger } from '../lib/logger';
 import { env } from '../config/env';
 import { otpEmailTemplate, cardReceivedTemplate } from './email-templates';
-import { sendWhatsAppText, beninRetryVariant } from './whatsapp';
+import { sendWhatsAppText, resolveWhatsAppNumber } from './whatsapp';
 import { whatsAppOtp, whatsAppCardDelivery } from './whatsapp-templates';
 
 type Channel = 'SMS' | 'WHATSAPP' | 'EMAIL';
@@ -44,18 +44,17 @@ export async function sendOtp(contact: string, channel: Channel, code: string): 
 
   if (channel === 'WHATSAPP') {
     const text = whatsAppOtp({ code, expiresInMinutes: env.OTP_TTL_MINUTES });
-    // 1ère tentative avec le numéro tel quel
-    try {
-      await sendWhatsAppText(contact, text);
-      return;
-    } catch (e) {
-      // 2e tentative : pour les numéros béninois, retire ou ajoute le 01 (cf. beninRetryVariant)
-      const alt = beninRetryVariant(contact);
-      if (!alt) throw e;
-      logger.warn({ contact, alt, reason: (e as Error).message }, '🔁 WAHA retry on Benin number variant');
-      await sendWhatsAppText(alt, text);
-      return;
+    // 1. Résoudre le bon format du numéro (Bénin : on bascule entre +229XXXXXXXX
+    //    et +22901XXXXXXXX selon ce qui a un compte WhatsApp actif).
+    const resolved = await resolveWhatsAppNumber(contact);
+    if (!resolved) {
+      // Aucun des formats n'a de compte WhatsApp → message clair pour le user.
+      throw new Error(
+        `Ce numéro (${contact}) n'a pas de compte WhatsApp actif. Vérifie que tu utilises bien le numéro associé à ton WhatsApp, ou utilise le canal Email.`,
+      );
     }
+    await sendWhatsAppText(resolved, text);
+    return;
   }
 
   // SMS is disabled platform-wide. Log in dev for debugging, reject in prod.
@@ -101,5 +100,12 @@ export async function sendCardWhatsApp(toPhone: string, args: CardDeliveryArgs):
     message: args.message,
     redeemUrl: args.redeemUrl,
   });
-  await sendWhatsAppText(toPhone, text);
+  // Le destinataire peut avoir un numéro avec ou sans le 01 (Bénin) → on résout.
+  const resolved = await resolveWhatsAppNumber(toPhone);
+  if (!resolved) {
+    throw new Error(
+      `Le destinataire (${toPhone}) n'a pas de compte WhatsApp actif. Demande à l'expéditeur de vérifier le numéro WhatsApp ou de choisir la livraison par email.`,
+    );
+  }
+  await sendWhatsAppText(resolved, text);
 }

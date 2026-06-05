@@ -23,8 +23,7 @@ type SendTextOk = { id: string };
 /**
  * Pour les numéros béninois (+229), certains comptes WhatsApp sont enregistrés
  * sous l'ancien format à 8 chiffres (sans le préfixe 01 ajouté en 2021), d'autres
- * sous le nouveau format à 10 chiffres avec le 01. WAHA renvoie une erreur
- * spécifique quand le chatId n'existe pas comme compte WhatsApp.
+ * sous le nouveau format à 10 chiffres avec le 01.
  *
  * Cette fonction retourne une variante alternative à essayer en cas d'échec :
  * - +22901XXXXXXXX (10 chiffres locaux) → +229XXXXXXXX (en retirant le 01)
@@ -41,6 +40,57 @@ export function beninRetryVariant(phoneE164: string): string | null {
     return `+22901${local}`;
   }
   return null;
+}
+
+/**
+ * Vérifie via WAHA si un numéro a un compte WhatsApp actif.
+ * WAHA expose GET /api/contacts/check-exists?phone=XXX qui renvoie { numberExists: bool }.
+ * En cas d'erreur réseau / WAHA down → renvoie null (le caller doit assumer "peut-être").
+ */
+export async function checkWhatsAppExists(phoneE164: string): Promise<boolean | null> {
+  if (!env.WAHA_URL) return null;
+  const cleaned = phoneE164.replace(/[^\d]/g, '');
+  if (cleaned.length < 8 || cleaned.length > 15) return false;
+  try {
+    const res = await axios.get(
+      `${env.WAHA_URL.replace(/\/$/, '')}/api/contacts/check-exists`,
+      {
+        params: { phone: cleaned, session: env.WAHA_SESSION },
+        timeout: TIMEOUT_MS,
+        headers: env.WAHA_API_KEY ? { 'X-Api-Key': env.WAHA_API_KEY } : undefined,
+      },
+    );
+    // WAHA renvoie soit { numberExists: bool } soit { exists: bool, ... }
+    const v = res.data;
+    if (typeof v?.numberExists === 'boolean') return v.numberExists;
+    if (typeof v?.exists === 'boolean') return v.exists;
+    return null;
+  } catch (err) {
+    const ax = err as AxiosError;
+    logger.warn({ phoneE164, status: ax.response?.status, message: ax.message }, 'WAHA check-exists failed');
+    return null;
+  }
+}
+
+/**
+ * Résout le bon format WhatsApp pour un numéro :
+ * - Tente d'abord avec le numéro tel quel
+ * - Si la vérification dit que le compte n'existe pas, tente la variante Bénin (retirer/ajouter 01)
+ * - Si la 2e variante existe, on retourne celle-là
+ * - Si aucune n'existe : retourne null (le caller doit signaler "pas de WhatsApp")
+ * - Si la vérification échoue (WAHA down, …), on retourne le numéro original (let it try anyway)
+ */
+export async function resolveWhatsAppNumber(phoneE164: string): Promise<string | null> {
+  const exists = await checkWhatsAppExists(phoneE164);
+  if (exists === true) return phoneE164;
+  if (exists === null) return phoneE164; // pas pu vérifier → on tente quand même
+  // exists === false → tenter la variante
+  const variant = beninRetryVariant(phoneE164);
+  if (!variant) return null;
+  const altExists = await checkWhatsAppExists(variant);
+  if (altExists === true) return variant;
+  // Aucun des 2 n'existe (ou WAHA down sur la 2e) → on signale l'absence
+  return altExists === null ? variant : null;
 }
 
 /**
