@@ -12,6 +12,7 @@ import { sendCardEmail, sendCardWhatsApp } from '../services/notifier';
 import { sendExpoPush } from '../services/push';
 import { createTransaction, generatePaymentToken } from '../services/fedapay';
 import { logger } from '../lib/logger';
+import { getNumericSetting } from '../services/platformSettings';
 
 // If the recipient phone matches an existing Donia user, send them a push notif
 // + persist a Notification row so it shows in the in-app inbox.
@@ -122,6 +123,27 @@ router.post('/', validate(createSchema), async (req, res) => {
     throw BadRequest('recipientEmail required for EMAIL delivery');
   }
 
+  // Applique les contraintes pilotées depuis l'admin (table PlatformSetting) :
+  // - commission_rate : taux prélevé sur la conversion
+  // - min_card_amount : refuse les cartes en dessous
+  // - max_amount_no_kyc : impose KYC au-delà
+  const commissionRate = await getNumericSetting('commission_rate', env.COMMISSION_RATE);
+  const minCard = await getNumericSetting('min_card_amount', 500);
+  const maxNoKyc = await getNumericSetting('max_amount_no_kyc', 50_000);
+  if (body.amount < minCard) {
+    throw BadRequest(`Le montant minimum d'une carte est de ${minCard.toLocaleString('fr-FR')} FCFA`, 'AMOUNT_TOO_LOW');
+  }
+  const sender = await prisma.user.findUnique({
+    where: { id: req.auth.userId },
+    select: { name: true, kycStatus: true },
+  });
+  if (body.amount > maxNoKyc && sender?.kycStatus !== 'APPROVED') {
+    throw BadRequest(
+      `Au-delà de ${maxNoKyc.toLocaleString('fr-FR')} FCFA, la vérification d'identité (KYC) est obligatoire.`,
+      'KYC_REQUIRED',
+    );
+  }
+
   const result = await prisma.$transaction(async (tx) => {
     const wallet = await tx.wallet.findUniqueOrThrow({ where: { userId: req.auth!.userId } });
     if (Number(wallet.balancePrincipal) < body.amount) {
@@ -141,7 +163,7 @@ router.post('/', validate(createSchema), async (req, res) => {
         message: body.message ?? null,
         palette: body.palette,
         deliveryChannel: body.deliveryChannel,
-        commissionRate: new Prisma.Decimal(env.COMMISSION_RATE),
+        commissionRate: new Prisma.Decimal(commissionRate / 100),
         status: 'SENT',
         sentAt: new Date(),
       },
@@ -163,11 +185,7 @@ router.post('/', validate(createSchema), async (req, res) => {
     return card;
   });
 
-  // Fetch sender's first name to personalize the delivery message + push notif.
-  const sender = await prisma.user.findUnique({
-    where: { id: req.auth.userId },
-    select: { name: true },
-  });
+  // Sender déjà fetched plus haut (check KYC) — réutilise son `name` ici.
   const senderName = sender?.name?.split(' ')[0] ?? 'Un proche';
 
   // Fire delivery (best-effort; in prod move to a queue)
@@ -204,10 +222,25 @@ router.post('/pay-mobile-money', validate(createSchema), async (req, res) => {
     throw BadRequest('recipientEmail required for EMAIL delivery');
   }
 
+  // Contraintes plateforme pilotées depuis l'admin.
+  const commissionRate = await getNumericSetting('commission_rate', env.COMMISSION_RATE);
+  const minCard = await getNumericSetting('min_card_amount', 500);
+  const maxNoKyc = await getNumericSetting('max_amount_no_kyc', 50_000);
+  if (body.amount < minCard) {
+    throw BadRequest(`Le montant minimum d'une carte est de ${minCard.toLocaleString('fr-FR')} FCFA`, 'AMOUNT_TOO_LOW');
+  }
+
   const user = await prisma.user.findUniqueOrThrow({
     where: { id: req.auth.userId },
-    select: { id: true, name: true, phone: true, email: true, country: true },
+    select: { id: true, name: true, phone: true, email: true, country: true, kycStatus: true },
   });
+
+  if (body.amount > maxNoKyc && user.kycStatus !== 'APPROVED') {
+    throw BadRequest(
+      `Au-delà de ${maxNoKyc.toLocaleString('fr-FR')} FCFA, la vérification d'identité (KYC) est obligatoire.`,
+      'KYC_REQUIRED',
+    );
+  }
 
   const { card, localTx } = await prisma.$transaction(async (tx) => {
     const card = await tx.card.create({
@@ -224,7 +257,7 @@ router.post('/pay-mobile-money', validate(createSchema), async (req, res) => {
         message: body.message ?? null,
         palette: body.palette,
         deliveryChannel: body.deliveryChannel,
-        commissionRate: new Prisma.Decimal(env.COMMISSION_RATE),
+        commissionRate: new Prisma.Decimal(commissionRate / 100),
         status: 'CREATED',
       },
     });

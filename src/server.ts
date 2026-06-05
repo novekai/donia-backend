@@ -35,6 +35,8 @@ import adminAnonymesRoutes from './routes/admin/anonymes';
 import adminSettingsRoutes from './routes/admin/settings';
 import adminCardTemplatesRoutes from './routes/admin/card-templates';
 import adminWhatsappRoutes from './routes/admin/whatsapp';
+import adminCirclesRoutes from './routes/admin/circles';
+import adminBirthdayCampaignsRoutes from './routes/admin/birthday-campaigns';
 
 export function buildApp(): Application {
   const app = express();
@@ -100,6 +102,8 @@ export function buildApp(): Application {
   app.use('/v1/admin/settings', adminSettingsRoutes);
   app.use('/v1/admin/card-templates', adminCardTemplatesRoutes);
   app.use('/v1/admin/whatsapp', adminWhatsappRoutes);
+  app.use('/v1/admin/circles', adminCirclesRoutes);
+  app.use('/v1/admin/birthday-campaigns', adminBirthdayCampaignsRoutes);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

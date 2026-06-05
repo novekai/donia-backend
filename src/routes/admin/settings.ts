@@ -5,12 +5,14 @@ import { prisma } from '../../lib/prisma';
 import { requireAdmin } from '../../middleware/adminAuth';
 import { validate } from '../../middleware/validate';
 import { env } from '../../config/env';
+import { invalidatePlatformSettings } from '../../services/platformSettings';
 
 const router = Router();
 router.use(requireAdmin);
 
 // Default values applied when a key has never been set in DB.
 // Numbers are stored as numbers, booleans as booleans — typed JSON in Postgres.
+// channel_sms volontairement retiré (06/2026) — Donia n'utilise pas le SMS.
 export const SETTING_DEFAULTS = {
   commission_rate: 5,             // % taken on conversion
   min_card_amount: 500,           // FCFA
@@ -18,7 +20,6 @@ export const SETTING_DEFAULTS = {
   referral_lifetime_active: true,
   channel_push: true,
   channel_email: true,
-  channel_sms: true,
   channel_whatsapp: true,
 } as const;
 
@@ -58,6 +59,9 @@ router.patch('/:key', validate(updateSchema), async (req, res) => {
     update: { value },
     create: { key, value },
   });
+  // Le mobile + backend lisent les settings via getPlatformSettings() (cache 60s).
+  // On invalide immédiatement pour que la nouvelle valeur soit prise en compte sans attendre.
+  invalidatePlatformSettings();
   res.json({ key: saved.key, value: saved.value });
 });
 

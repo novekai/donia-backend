@@ -15,8 +15,22 @@ import { BadRequest, NotFound } from '../lib/errors';
 import { autoModerate, hashSenderIp } from '../services/anonymes';
 import { sendExpoPush } from '../services/push';
 import { logger } from '../lib/logger';
+import { getPlatformSettings } from '../services/platformSettings';
 
 const router = Router();
+
+// GET /v1/public/settings — valeurs de plateforme nécessaires aux clients (mobile + web).
+// Pas d'auth — ces valeurs ne sont pas sensibles (montants min/max, commission affichée, etc).
+// Les booléens de canal notification ne sont PAS exposés ici (info interne).
+router.get('/settings', async (_req, res) => {
+  const s = await getPlatformSettings();
+  res.json({
+    minCardAmount: s.min_card_amount,
+    maxAmountNoKyc: s.max_amount_no_kyc,
+    commissionRate: s.commission_rate, // en pourcentage (0–100)
+    referralLifetimeActive: s.referral_lifetime_active,
+  });
+});
 
 // Hard limits
 const messageLimiterPerIp = rateLimit({
