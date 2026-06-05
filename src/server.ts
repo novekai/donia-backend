@@ -17,6 +17,7 @@ import cardsRoutes from './routes/cards';
 import walletRoutes from './routes/wallet';
 import transactionsRoutes from './routes/transactions';
 import notificationsRoutes from './routes/notifications';
+import birthdaysRoutes from './routes/birthdays';
 import referralRoutes from './routes/referral';
 import cagnotteRoutes from './routes/cagnotte';
 import kycRoutes from './routes/kyc';
@@ -75,6 +76,7 @@ export function buildApp(): Application {
   app.use('/v1/wallet', walletRoutes);
   app.use('/v1/transactions', transactionsRoutes);
   app.use('/v1/notifications', notificationsRoutes);
+  app.use('/v1/birthdays', birthdaysRoutes);
   app.use('/v1/referral', referralRoutes);
   app.use('/v1/cagnottes', cagnotteRoutes);
   app.use('/v1/kyc', kycRoutes);
