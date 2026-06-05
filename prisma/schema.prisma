@@ -166,6 +166,7 @@ model Session {
   expiresAt  DateTime
   ip         String?
   userAgent  String?
+  deviceName String?                                   // ex: "Tecno Camon 20", "iPhone 13", "Samsung S22"
   revokedAt  DateTime?
   createdAt  DateTime @default(now())
 

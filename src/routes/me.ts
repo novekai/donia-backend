@@ -140,7 +140,7 @@ router.get('/sessions', async (req, res) => {
   const sessions = await prisma.session.findMany({
     where: { userId: req.auth.userId, revokedAt: null, expiresAt: { gt: new Date() } },
     orderBy: { createdAt: 'desc' },
-    select: { id: true, ip: true, userAgent: true, createdAt: true, expiresAt: true, jtiHash: true },
+    select: { id: true, ip: true, userAgent: true, deviceName: true, createdAt: true, expiresAt: true, jtiHash: true },
     take: 50,
   });
   // Marque la session courante (pour que le mobile la mette en évidence et empêche sa révocation).
@@ -150,6 +150,7 @@ router.get('/sessions', async (req, res) => {
       id: s.id,
       ip: s.ip,
       userAgent: s.userAgent,
+      deviceName: s.deviceName,
       createdAt: s.createdAt,
       expiresAt: s.expiresAt,
       isCurrent: currentJtiHash !== null && s.jtiHash.includes(currentJtiHash.slice(0, 12)),

@@ -31,11 +31,13 @@ const signupSchema = z.object({
   city: z.string().optional(),
   country: z.string().length(2).default('BJ'),
   referredBy: z.string().optional(),
+  deviceName: z.string().max(80).optional(),    // ex: "Tecno Camon 20"
 });
 
 const loginSchema = z.object({
   identifier: z.string(),     // phone OR email
   password: passwordSchema,
+  deviceName: z.string().max(80).optional(),
 });
 
 const otpSendSchema = z.object({
@@ -69,7 +71,11 @@ async function uniqueReferralCode(name: string): Promise<string> {
   return buildReferralCode(name) + '-' + Math.random().toString(36).slice(2, 6).toUpperCase();
 }
 
-async function issueSession(userId: string, req: { ip?: string; headers: Record<string, string | string[] | undefined> }) {
+async function issueSession(
+  userId: string,
+  req: { ip?: string; headers: Record<string, string | string[] | undefined> },
+  deviceName?: string | null,
+) {
   const jti = newJti();
   const { token, jtiHash, expiresAt } = signToken({ sub: userId, jti });
   await prisma.session.create({
@@ -79,6 +85,7 @@ async function issueSession(userId: string, req: { ip?: string; headers: Record<
       expiresAt,
       ip: req.ip ?? null,
       userAgent: (req.headers['user-agent'] as string) ?? null,
+      deviceName: deviceName ?? null,
     },
   });
   return { token, expiresAt };
@@ -150,12 +157,12 @@ router.post('/signup', validate(signupSchema), async (req, res) => {
     }
   }
 
-  const session = await issueSession(user.id, req);
+  const session = await issueSession(user.id, req, body.deviceName);
   res.status(201).json({ user, token: session.token, expiresAt: session.expiresAt });
 });
 
 router.post('/login', validate(loginSchema), async (req, res) => {
-  const { identifier, password } = req.body as z.infer<typeof loginSchema>;
+  const { identifier, password, deviceName } = req.body as z.infer<typeof loginSchema>;
   const where = identifier.includes('@') ? { email: identifier } : { phone: identifier };
   const user = await prisma.user.findUnique({
     where,
@@ -165,7 +172,7 @@ router.post('/login', validate(loginSchema), async (req, res) => {
   const ok = await verifyPassword(password, user.passwordHash);
   if (!ok) throw Unauthorized('Invalid credentials');
 
-  const session = await issueSession(user.id, req);
+  const session = await issueSession(user.id, req, deviceName);
   const { passwordHash: _omit, ...safe } = user;
   res.json({ user: safe, token: session.token, expiresAt: session.expiresAt });
 });
