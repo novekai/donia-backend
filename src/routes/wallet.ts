@@ -177,6 +177,75 @@ router.post('/topup/code', validate(topupCodeSchema), async (req, res) => {
   res.json(result);
 });
 
+// ── POST /v1/wallet/withdraw — demande de retrait Mobile Money ──
+// V1 : la demande est créée en PENDING et le solde immédiatement débité.
+// Le payout est traité manuellement côté admin (Paul reçoit la liste des
+// demandes PENDING et fait les virements via FedaPay payout ou un autre canal).
+// V1.1 : intégration FedaPay payout automatique.
+//
+// Garde-fous :
+// - KYC obligatoire (obligation BCEAO)
+// - Montant > 500 FCFA
+// - Solde suffisant
+const withdrawSchema = z.object({
+  amount: z.number().positive(),
+  operator: z.string().min(2).max(20),       // mtn, moov, orange, wave, etc.
+  phoneNumber: z.string().regex(/^\+\d{8,15}$/),  // E.164
+});
+
+router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
+  if (!req.auth) throw Unauthorized();
+  const body = req.body as z.infer<typeof withdrawSchema>;
+
+  const user = await prisma.user.findUniqueOrThrow({
+    where: { id: req.auth.userId },
+    select: { id: true, name: true, kycStatus: true, phone: true },
+  });
+
+  if (user.kycStatus !== 'APPROVED') {
+    throw BadRequest(
+      "Tu dois d'abord valider ta pièce d'identité (KYC) avant de pouvoir retirer ton solde sur Mobile Money.",
+      'KYC_REQUIRED',
+    );
+  }
+  if (body.amount < 500) {
+    throw BadRequest('Le montant minimum d\'un retrait est de 500 FCFA.', 'AMOUNT_TOO_LOW');
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const wallet = await tx.wallet.findUniqueOrThrow({ where: { userId: req.auth!.userId } });
+    if (Number(wallet.balancePrincipal) < body.amount) {
+      throw BadRequest('Solde insuffisant.', 'INSUFFICIENT_FUNDS');
+    }
+    // Débit immédiat (sera remboursé si Paul invalide la demande côté admin)
+    await tx.wallet.update({
+      where: { userId: req.auth!.userId },
+      data: { balancePrincipal: { decrement: new Prisma.Decimal(body.amount) } },
+    });
+    const localTx = await tx.transaction.create({
+      data: {
+        userId: req.auth!.userId,
+        type: 'WITHDRAWAL',
+        amount: new Prisma.Decimal(body.amount),
+        status: 'PENDING',
+        metadata: {
+          operator: body.operator,
+          phoneNumber: body.phoneNumber,
+          requestedAt: new Date().toISOString(),
+        },
+      },
+    });
+    return localTx;
+  });
+
+  res.json({
+    ok: true,
+    txId: result.id,
+    status: 'PENDING',
+    message: 'Demande de retrait reçue. Ton Mobile Money sera crédité sous 24-48h ouvrées.',
+  });
+});
+
 // ── GET /v1/wallet/topup/recent — last 5 topups ──
 router.get('/topup/recent', async (req, res) => {
   if (!req.auth) throw Unauthorized();
