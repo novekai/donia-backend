@@ -187,10 +187,17 @@ router.post('/topup/code', validate(topupCodeSchema), async (req, res) => {
 // - KYC obligatoire (obligation BCEAO)
 // - Montant > 500 FCFA
 // - Solde suffisant
+// Schema de retrait flexible : on accepte soit Mobile Money (operator + phoneNumber),
+// soit carte bancaire (operator='bank_card' + accountNumber libre = IBAN, RIB, ou
+// numéro de carte). Le destinataire est validé par Paul cote admin avant payout.
 const withdrawSchema = z.object({
-  amount: z.number().positive(),
-  operator: z.string().min(2).max(20),       // mtn, moov, orange, wave, etc.
-  phoneNumber: z.string().regex(/^\+\d{8,15}$/),  // E.164
+  amount: z.number().positive(),                       // min 1 FCFA (plus de plancher 500)
+  operator: z.string().min(2).max(30),                 // mtn, moov, orange, wave, bank_card
+  // Soit phoneNumber (Mobile Money), soit accountNumber (carte bancaire / IBAN)
+  phoneNumber: z.string().regex(/^\+\d{8,15}$/).optional(),
+  accountNumber: z.string().min(4).max(34).optional(), // IBAN max 34, carte 16-19
+}).refine((d) => d.phoneNumber || d.accountNumber, {
+  message: "Indique soit un numéro Mobile Money (phoneNumber) soit un IBAN/numéro de carte (accountNumber).",
 });
 
 router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
@@ -204,12 +211,9 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
 
   if (user.kycStatus !== 'APPROVED') {
     throw BadRequest(
-      "Tu dois d'abord valider ta pièce d'identité (KYC) avant de pouvoir retirer ton solde sur Mobile Money.",
+      "Tu dois d'abord valider ta pièce d'identité (KYC) avant de pouvoir retirer ton solde.",
       'KYC_REQUIRED',
     );
-  }
-  if (body.amount < 500) {
-    throw BadRequest('Le montant minimum d\'un retrait est de 500 FCFA.', 'AMOUNT_TOO_LOW');
   }
 
   const result = await prisma.$transaction(async (tx) => {
@@ -217,7 +221,6 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
     if (Number(wallet.balancePrincipal) < body.amount) {
       throw BadRequest('Solde insuffisant.', 'INSUFFICIENT_FUNDS');
     }
-    // Débit immédiat (sera remboursé si Paul invalide la demande côté admin)
     await tx.wallet.update({
       where: { userId: req.auth!.userId },
       data: { balancePrincipal: { decrement: new Prisma.Decimal(body.amount) } },
@@ -230,7 +233,8 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
         status: 'PENDING',
         metadata: {
           operator: body.operator,
-          phoneNumber: body.phoneNumber,
+          phoneNumber: body.phoneNumber ?? null,
+          accountNumber: body.accountNumber ?? null,
           requestedAt: new Date().toISOString(),
         },
       },
@@ -238,12 +242,13 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
     return localTx;
   });
 
-  res.json({
-    ok: true,
-    txId: result.id,
-    status: 'PENDING',
-    message: 'Demande de retrait reçue. Ton Mobile Money sera crédité sous 24-48h ouvrées.',
-  });
+  // Message contextuel selon le canal
+  const isBankCard = body.operator === 'bank_card';
+  const message = isBankCard
+    ? "Demande de retrait reçue. Ton compte bancaire sera crédité sous 2-5 jours ouvrés."
+    : "Demande de retrait reçue. Ton Mobile Money sera crédité sous 24-48h ouvrées.";
+
+  res.json({ ok: true, txId: result.id, status: 'PENDING', message });
 });
 
 // ── GET /v1/wallet/topup/recent — last 5 topups ──
