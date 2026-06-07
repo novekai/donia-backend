@@ -25,8 +25,9 @@ router.get('/', async (req, res) => {
 // MVP: just creates a PENDING transaction; real FedaPay integration to wire later.
 const topupMMSchema = z.object({
   amount: z.number().positive(),
-  operator: z.string(),       // e.g. "mtn", "moov"
+  operator: z.string(),       // e.g. "mtn", "moov", "card" (carte bancaire)
   country: z.string().length(2),
+  currency: z.enum(['XOF', 'EUR']).default('XOF'),
 });
 
 router.post('/topup/mobile-money', validate(topupMMSchema), async (req, res) => {
@@ -56,16 +57,25 @@ router.post('/topup/mobile-money', validate(topupMMSchema), async (req, res) => 
     const lastname = rest.join(' ') || firstname;
     // E.164 → strip + and country code for FedaPay phone_number (it expects local digits + country code separately)
     const localNumber = user.phone.replace(/^\+\d{1,3}/, '').replace(/\D/g, '');
+    // Si EUR, on envoie le montant en EUR (avec parite XOF/EUR fixe 655.957)
+    // Si carte bancaire, on bascule en EUR pour ouvrir le formulaire carte FedaPay.
+    const isCard = body.operator === 'card';
+    const fedaCurrency: 'XOF' | 'EUR' = body.currency === 'EUR' || isCard ? 'EUR' : 'XOF';
+    const fedaAmount =
+      fedaCurrency === 'EUR'
+        ? Math.round((body.amount / 655.957) * 100) / 100    // 2 decimales EUR
+        : Math.round(body.amount);                             // XOF entiers
     const fedaTx = await createTransaction({
-      amount: Math.round(body.amount),                                   // XOF integers only
-      description: `Recharge Donia · ${body.amount} FCFA`,
+      amount: fedaAmount,
+      currency: { iso: fedaCurrency },
+      description: `Recharge Donia · ${body.amount} FCFA${isCard ? ' (carte bancaire)' : ''}`,
       customer: {
         firstname,
         lastname,
         email: user.email ?? undefined,
         phone_number: { number: localNumber, country: user.country.toLowerCase() },
       },
-      metadata: { donia_tx_id: localTx.id, operator: body.operator },
+      metadata: { donia_tx_id: localTx.id, operator: body.operator, currency: fedaCurrency },
     });
 
     // 3. Generate payment URL
