@@ -17,6 +17,7 @@ export const SETTING_DEFAULTS = {
   commission_rate: 5,             // % taken on conversion
   min_card_amount: 500,           // FCFA
   min_withdrawal_amount: 500,     // FCFA — pilote depuis le BO
+  max_auto_payout_amount: 50_000, // FCFA — plafond pour declenchement auto FedaPay Payout
   max_amount_no_kyc: 50_000,      // FCFA
   referral_lifetime_active: true,
   channel_push: true,

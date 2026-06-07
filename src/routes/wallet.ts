@@ -7,7 +7,7 @@ import { validate } from '../middleware/validate';
 import { prisma } from '../lib/prisma';
 import { env } from '../config/env';
 import { BadRequest, NotFound, Unauthorized } from '../lib/errors';
-import { createTransaction, generatePaymentToken } from '../services/fedapay';
+import { createTransaction, generatePaymentToken, createPayout, startPayout, resolvePayoutMode } from '../services/fedapay';
 import { logger } from '../lib/logger';
 import { getNumericSetting } from '../services/platformSettings';
 
@@ -218,7 +218,7 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
 
   const user = await prisma.user.findUniqueOrThrow({
     where: { id: req.auth.userId },
-    select: { id: true, name: true, kycStatus: true, phone: true },
+    select: { id: true, name: true, kycStatus: true, phone: true, country: true },
   });
 
   if (user.kycStatus !== 'APPROVED') {
@@ -263,13 +263,85 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
     return localTx;
   });
 
-  // Message contextuel selon le canal
   const isBankCard = body.operator === 'bank_card';
+
+  // ── Tentative de payout automatique via FedaPay ──
+  // Conditions : Mobile Money + amount <= max_auto_payout + operateur/pays supporte +
+  // l'API Payouts est activee cote FedaPay merchant.
+  // Si rien de tout ca, on reste en PENDING manuel (workflow BO).
+  let autoTriggered = false;
+  if (!isBankCard && body.phoneNumber) {
+    const maxAuto = await getNumericSetting('max_auto_payout_amount', 50_000);
+    if (body.amount <= maxAuto) {
+      const mode = resolvePayoutMode(body.operator, user.country);
+      if (mode) {
+        try {
+          const [firstname, ...rest] = user.name.split(' ');
+          const lastname = rest.join(' ') || firstname;
+          const localNumber = body.phoneNumber.replace(/^\+\d{1,3}/, '').replace(/\D/g, '');
+
+          const payout = await createPayout({
+            amount: Math.round(body.amount),
+            mode,
+            description: `Retrait Donia · ${body.amount} FCFA`,
+            customer: {
+              firstname,
+              lastname,
+              phone_number: { number: localNumber, country: user.country.toLowerCase() },
+            },
+            metadata: { donia_tx_id: result.id, kind: 'withdrawal' },
+          });
+          const started = await startPayout(payout.id);
+
+          await prisma.transaction.update({
+            where: { id: result.id },
+            data: {
+              ref: String(payout.id),
+              metadata: {
+                ...((result.metadata as Record<string, unknown>) ?? {}),
+                fedapayPayoutId: payout.id,
+                payoutMode: mode,
+                payoutStatus: started.status,
+                autoTriggered: true,
+              },
+            },
+          });
+          autoTriggered = true;
+          logger.info({ payoutId: payout.id, txId: result.id, status: started.status }, '🚀 Payout auto FedaPay declenche');
+        } catch (e) {
+          // Fallback gracieux : si Payouts pas active OU echec API, on reste en PENDING manuel.
+          logger.warn(
+            { err: (e as Error).message, txId: result.id, operator: body.operator, country: user.country },
+            'Payout auto FedaPay echec, fallback manuel BO',
+          );
+          await prisma.transaction.update({
+            where: { id: result.id },
+            data: {
+              metadata: {
+                ...((result.metadata as Record<string, unknown>) ?? {}),
+                autoTriggerError: (e as Error).message,
+                autoTriggered: false,
+              },
+            },
+          });
+        }
+      } else {
+        logger.info(
+          { operator: body.operator, country: user.country },
+          'Operateur/pays non supporte par FedaPay Payouts, fallback manuel BO',
+        );
+      }
+    }
+  }
+
+  // Message contextuel selon le canal et selon que l'auto a marche
   const message = isBankCard
     ? "Demande de retrait reçue. Ton compte bancaire sera crédité sous 2-5 jours ouvrés."
-    : "Demande de retrait reçue. Ton Mobile Money sera crédité sous 24-48h ouvrées.";
+    : autoTriggered
+      ? "Retrait envoyé ! Ton Mobile Money sera crédité dans quelques minutes."
+      : "Demande de retrait reçue. Ton Mobile Money sera crédité sous 24-48h ouvrées.";
 
-  res.json({ ok: true, txId: result.id, status: 'PENDING', message });
+  res.json({ ok: true, txId: result.id, status: 'PENDING', message, autoTriggered });
 });
 
 // ── GET /v1/wallet/topup/recent — last 5 topups ──

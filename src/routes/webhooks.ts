@@ -4,7 +4,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
-import { verifyWebhookSignature, type FedapayTransaction } from '../services/fedapay';
+import { verifyWebhookSignature, type FedapayTransaction, type FedapayPayout } from '../services/fedapay';
 import { sendCardEmail, sendCardWhatsApp } from '../services/notifier';
 import { sendExpoPush } from '../services/push';
 
@@ -26,18 +26,24 @@ router.post('/fedapay', async (req: Request, res: Response, next: NextFunction) 
 
     // Parse the JSON now (after signature verification).
     // FedaPay payload shape: { name: "transaction.approved", object: "transaction", entity: {...} }
+    // Pour les payouts: { name: "payout.approved", object: "payout", entity: {...} }
     const payload = JSON.parse(rawBody.toString('utf8')) as {
       name?: string;
       object?: string;
-      entity?: FedapayTransaction;
+      entity?: FedapayTransaction | FedapayPayout;
     };
 
+    // ── Branche PAYOUTS (retraits sortants) ──
+    if (payload.object === 'payout' && payload.entity) {
+      return await handlePayoutEvent(req, res, payload.name ?? '', payload.entity as FedapayPayout);
+    }
+
     if (payload.object !== 'transaction' || !payload.entity) {
-      logger.info({ name: payload.name, object: payload.object }, 'FedaPay webhook : event ignoré (non-transaction)');
+      logger.info({ name: payload.name, object: payload.object }, 'FedaPay webhook : event ignoré (non-transaction/non-payout)');
       return res.json({ ok: true, ignored: true });
     }
 
-    const fedaTx = payload.entity;
+    const fedaTx = payload.entity as FedapayTransaction;
     const eventName = payload.name ?? '';
     const fedapayTxId = fedaTx.id;
 
@@ -146,5 +152,119 @@ router.post('/fedapay', async (req: Request, res: Response, next: NextFunction) 
     next(e);
   }
 });
+
+// ── Handler PAYOUTS (retraits FedaPay) ──
+// Events:
+//   - payout.approved : payout effectivement effectue cote operateur MM → SUCCESS
+//   - payout.declined / payout.failed : echec → REFUNDED + recredit le solde
+// Idempotent (FedaPay peut envoyer plusieurs fois).
+async function handlePayoutEvent(_req: Request, res: Response, eventName: string, fedaPayout: FedapayPayout) {
+  const localTx = await prisma.transaction.findFirst({
+    where: { ref: String(fedaPayout.id), type: 'WITHDRAWAL' },
+  });
+  if (!localTx) {
+    logger.warn({ fedapayPayoutId: fedaPayout.id }, 'FedaPay webhook payout : transaction locale introuvable');
+    return res.json({ ok: true, ignored: true, reason: 'local tx not found' });
+  }
+
+  // Idempotence
+  if (localTx.status === 'SUCCESS' || localTx.status === 'REFUNDED' || localTx.status === 'FAILED') {
+    logger.info({ localTxId: localTx.id, currentStatus: localTx.status }, 'FedaPay webhook payout : deja finalise, ignore');
+    return res.json({ ok: true, idempotent: true });
+  }
+
+  const isApproved =
+    eventName === 'payout.approved' ||
+    fedaPayout.status === 'approved' ||
+    fedaPayout.status === 'sent';
+  const isDeclined =
+    eventName === 'payout.declined' ||
+    eventName === 'payout.failed' ||
+    fedaPayout.status === 'declined' ||
+    fedaPayout.status === 'failed' ||
+    fedaPayout.status === 'canceled';
+
+  const meta = (localTx.metadata as Record<string, unknown> | null) ?? {};
+
+  if (isApproved) {
+    await prisma.transaction.update({
+      where: { id: localTx.id },
+      data: {
+        status: 'SUCCESS',
+        metadata: { ...meta, payoutApprovedAt: new Date().toISOString(), payoutStatus: fedaPayout.status },
+      },
+    });
+    logger.info({ localTxId: localTx.id, amount: localTx.amount.toString() }, '✅ Payout FedaPay approuve');
+
+    // Push notif user (best-effort)
+    try {
+      await sendExpoPush({
+        userId: localTx.userId,
+        title: 'Retrait effectué ✅',
+        body: `Tu as reçu ${Number(localTx.amount).toLocaleString('fr-FR').replace(/,/g, ' ')} FCFA sur ton Mobile Money.`,
+        data: { type: 'withdrawal_success', txId: localTx.id },
+      });
+      await prisma.notification.create({
+        data: {
+          userId: localTx.userId,
+          type: 'withdrawal_success',
+          title: 'Retrait effectué ✅',
+          body: `Tu as reçu ${Number(localTx.amount).toLocaleString('fr-FR').replace(/,/g, ' ')} FCFA sur ton Mobile Money.`,
+          emoji: '💸',
+          data: { txId: localTx.id },
+        },
+      });
+    } catch (pushErr) {
+      logger.warn({ err: pushErr }, 'payout push failed (non-fatal)');
+    }
+  } else if (isDeclined) {
+    // Echec du payout → on recredite immediatement le solde + REFUNDED.
+    await prisma.$transaction([
+      prisma.wallet.update({
+        where: { userId: localTx.userId },
+        data: { balancePrincipal: { increment: new Prisma.Decimal(localTx.amount) } },
+      }),
+      prisma.transaction.update({
+        where: { id: localTx.id },
+        data: {
+          status: 'REFUNDED',
+          metadata: {
+            ...meta,
+            payoutDeclinedAt: new Date().toISOString(),
+            payoutStatus: fedaPayout.status,
+            payoutEventName: eventName,
+          },
+        },
+      }),
+    ]);
+    logger.info({ localTxId: localTx.id, amount: localTx.amount.toString() }, '❌ Payout FedaPay refuse, solde recredite');
+
+    // Push notif user
+    try {
+      await sendExpoPush({
+        userId: localTx.userId,
+        title: 'Retrait non effectué',
+        body: 'Ton retrait a échoué. Ton solde a été recrédité automatiquement.',
+        data: { type: 'withdrawal_failed', txId: localTx.id },
+      });
+      await prisma.notification.create({
+        data: {
+          userId: localTx.userId,
+          type: 'withdrawal_failed',
+          title: 'Retrait non effectué',
+          body: 'Ton retrait a échoué. Ton solde a été recrédité automatiquement.',
+          emoji: '↺',
+          data: { txId: localTx.id },
+        },
+      });
+    } catch (pushErr) {
+      logger.warn({ err: pushErr }, 'payout-failed push failed (non-fatal)');
+    }
+  } else {
+    logger.info({ eventName, status: fedaPayout.status }, 'FedaPay webhook payout : statut intermediaire, pas action');
+  }
+
+  return res.json({ ok: true });
+}
 
 export default router;

@@ -93,6 +93,105 @@ export async function getTransaction(transactionId: number): Promise<FedapayTran
   return (data?.['v1/transaction'] ?? data) as FedapayTransaction;
 }
 
+// ─────────────────────────── PAYOUTS (virements sortants) ───────────────────────────
+// Doc: https://docs.fedapay.com/payouts
+// IMPORTANT : l'API Payouts doit etre activee dans le dashboard FedaPay merchant
+// (demande commerciale a faire chez FedaPay). Sans activation, createPayout throw.
+// Le code gere ce cas en fallback PENDING manuel cote wallet/withdraw.
+
+export type FedapayPayoutStatus =
+  | 'pending'
+  | 'started'
+  | 'sent'
+  | 'approved'
+  | 'declined'
+  | 'canceled'
+  | 'failed';
+
+// Mode = canal Mobile Money. Mapping donne par FedaPay (a verifier dans leur dashboard).
+// Les codes "_open" sont generiques par operateur ; les codes pays-specifiques aussi.
+export type FedapayPayoutMode =
+  | 'mtn_open'      // MTN (BJ / CI selon activation)
+  | 'mtn_ci'        // MTN CI
+  | 'moov_open'     // Moov (BJ / TG)
+  | 'moov_tg'       // Moov Togo
+  | 'moov_ci'       // Moov CI
+  | 'orange_sn'     // Orange Senegal
+  | 'orange_ci'     // Orange CI
+  | 'orange_ml'     // Orange Mali
+  | 'orange_bf'     // Orange Burkina
+  | 'wave_sn'       // Wave Senegal
+  | 'wave_ci'       // Wave CI
+  | 'free_sn';      // Free Senegal
+
+export type CreatePayoutInput = {
+  amount: number;                  // XOF integer
+  currency?: { iso: 'XOF' | 'XAF' };
+  mode: FedapayPayoutMode;
+  customer: {
+    firstname?: string;
+    lastname?: string;
+    email?: string;
+    phone_number: { number: string; country: string };
+  };
+  description?: string;
+  metadata?: Record<string, string | number | boolean>;
+};
+
+export type FedapayPayout = {
+  id: number;
+  status: FedapayPayoutStatus;
+  amount: number;
+  reference?: string;
+  mode?: string;
+  created_at?: string;
+  metadata?: Record<string, unknown>;
+};
+
+// 1. Cree le payout en "pending" (pas encore parti).
+export async function createPayout(input: CreatePayoutInput): Promise<FedapayPayout> {
+  const client = getClient();
+  const body = { ...input, currency: input.currency ?? { iso: 'XOF' } };
+  const { data } = await client.post('/v1/payouts', body);
+  return (data?.['v1/payout'] ?? data) as FedapayPayout;
+}
+
+// 2. Declenche l'envoi effectif. FedaPay enverra ensuite le webhook payout.approved / payout.declined.
+export async function startPayout(payoutId: number): Promise<FedapayPayout> {
+  const client = getClient();
+  const { data } = await client.put(`/v1/payouts/${payoutId}/start`, {});
+  return (data?.['v1/payout'] ?? data) as FedapayPayout;
+}
+
+// Mappe operateur Donia + pays user vers le mode FedaPay.
+// Retourne null si la combinaison n'est pas supportee (fallback manuel BO).
+export function resolvePayoutMode(operator: string, country: string): FedapayPayoutMode | null {
+  const c = country.toUpperCase();
+  switch (operator) {
+    case 'mtn':
+      if (c === 'BJ') return 'mtn_open';
+      if (c === 'CI') return 'mtn_ci';
+      return null;
+    case 'moov':
+      if (c === 'BJ') return 'moov_open';
+      if (c === 'TG') return 'moov_tg';
+      if (c === 'CI') return 'moov_ci';
+      return null;
+    case 'orange':
+      if (c === 'SN') return 'orange_sn';
+      if (c === 'CI') return 'orange_ci';
+      if (c === 'ML') return 'orange_ml';
+      if (c === 'BF') return 'orange_bf';
+      return null;
+    case 'wave':
+      if (c === 'SN') return 'wave_sn';
+      if (c === 'CI') return 'wave_ci';
+      return null;
+    default:
+      return null;
+  }
+}
+
 // ─────────────────────────── WEBHOOK SIGNATURE VERIFY ───────────────────────────
 
 // FedaPay envoie une signature au format Stripe-style :
