@@ -5,6 +5,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { logger } from '../lib/logger';
 import { verifyWebhookSignature, type FedapayTransaction, type FedapayPayout } from '../services/fedapay';
+import { kkiapayProvider, type KkiapayWebhookPayload } from '../services/kkiapay';
 import { sendCardEmail, sendCardWhatsApp } from '../services/notifier';
 import { sendExpoPush } from '../services/push';
 
@@ -149,6 +150,121 @@ router.post('/fedapay', async (req: Request, res: Response, next: NextFunction) 
     res.json({ ok: true });
   } catch (e) {
     logger.error({ err: e }, 'Webhook FedaPay : erreur');
+    next(e);
+  }
+});
+
+// ── POST /webhooks/kkiapay ──
+// KKiaPay envoie un body genre :
+//   { transactionId, status: 'SUCCESS'|'FAILED'|..., amount, type: 'payment'|'transfer', data }
+// Signature: header X-Kkiapay-Signature = hex HMAC-SHA256(rawBody, KKIAPAY_SECRET_KEY)
+router.post('/kkiapay', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const rawBody = req.body as Buffer;
+    const signature = (req.header('x-kkiapay-signature') ?? req.header('X-Kkiapay-Signature')) as string | undefined;
+
+    if (!kkiapayProvider.verifyWebhookSignature(rawBody, signature)) {
+      logger.warn({ signature }, 'KKiaPay webhook : signature invalide');
+      return res.status(401).json({ error: 'invalid signature' });
+    }
+
+    const payload = JSON.parse(rawBody.toString('utf8')) as KkiapayWebhookPayload;
+    const providerTxId = String(payload.transactionId ?? payload.reference ?? '');
+    if (!providerTxId) {
+      logger.info({ payload }, 'KKiaPay webhook : pas de transactionId, ignore');
+      return res.json({ ok: true, ignored: true });
+    }
+
+    const localTx = await prisma.transaction.findFirst({ where: { ref: providerTxId } });
+    if (!localTx) {
+      logger.warn({ providerTxId }, 'KKiaPay webhook : transaction locale introuvable');
+      return res.json({ ok: true, ignored: true });
+    }
+    if (localTx.status === 'SUCCESS' || localTx.status === 'FAILED' || localTx.status === 'REFUNDED') {
+      return res.json({ ok: true, idempotent: true });
+    }
+
+    const status = String(payload.status ?? '').toUpperCase();
+    const isApproved = status === 'SUCCESS' || status === 'COMPLETED' || status === 'APPROVED';
+    const isDeclined = status === 'FAILED' || status === 'DECLINED' || status === 'REJECTED' || status === 'CANCELED';
+    const isPayout = (payload.type ?? '').toLowerCase() === 'transfer' || localTx.type === 'WITHDRAWAL';
+
+    const meta = (localTx.metadata as { kind?: string; cardId?: string } | null) ?? {};
+    const isCardPayment = meta.kind === 'card_payment';
+
+    if (isPayout) {
+      // Retrait : approved → SUCCESS + push ; declined → REFUNDED + recredit + push
+      if (isApproved) {
+        await prisma.transaction.update({
+          where: { id: localTx.id },
+          data: { status: 'SUCCESS', metadata: { ...meta, payoutApprovedAt: new Date().toISOString() } },
+        });
+        try {
+          await sendExpoPush({
+            userId: localTx.userId,
+            title: 'Retrait effectué ✅',
+            body: `Tu as reçu ${Number(localTx.amount).toLocaleString('fr-FR').replace(/,/g, ' ')} FCFA sur ton Mobile Money.`,
+            data: { type: 'withdrawal_success', txId: localTx.id },
+          });
+        } catch (e) {
+          logger.warn({ err: e }, 'kkiapay payout push failed');
+        }
+      } else if (isDeclined) {
+        await prisma.$transaction([
+          prisma.wallet.update({
+            where: { userId: localTx.userId },
+            data: { balancePrincipal: { increment: new Prisma.Decimal(localTx.amount) } },
+          }),
+          prisma.transaction.update({
+            where: { id: localTx.id },
+            data: { status: 'REFUNDED', metadata: { ...meta, payoutDeclinedAt: new Date().toISOString() } },
+          }),
+        ]);
+      }
+      return res.json({ ok: true });
+    }
+
+    // Recharge (payment)
+    if (isApproved) {
+      if (isCardPayment && meta.cardId) {
+        const card = await prisma.$transaction(async (tx) => {
+          await tx.transaction.update({ where: { id: localTx.id }, data: { status: 'SUCCESS' } });
+          return tx.card.update({ where: { id: meta.cardId! }, data: { status: 'SENT', sentAt: new Date() } });
+        });
+        const senderUser = await prisma.user.findUnique({ where: { id: card.senderId }, select: { name: true } });
+        const senderName = senderUser?.name?.split(' ')[0] ?? 'Un proche';
+        const deliveryArgs = { code: card.redeemCode, sender: senderName, amount: String(card.amount) };
+        try {
+          if (card.deliveryChannel === 'EMAIL' && card.recipientEmail) {
+            await sendCardEmail(card.recipientEmail, deliveryArgs);
+          } else {
+            await sendCardWhatsApp(card.recipientPhone, deliveryArgs);
+          }
+        } catch (e) {
+          logger.error({ err: e, cardId: card.id }, 'kkiapay : Card delivery failed after payment');
+        }
+      } else {
+        await prisma.$transaction([
+          prisma.transaction.update({ where: { id: localTx.id }, data: { status: 'SUCCESS' } }),
+          prisma.wallet.update({
+            where: { userId: localTx.userId },
+            data: { balancePrincipal: { increment: new Prisma.Decimal(localTx.amount) } },
+          }),
+        ]);
+      }
+    } else if (isDeclined) {
+      if (isCardPayment && meta.cardId) {
+        await prisma.$transaction([
+          prisma.transaction.update({ where: { id: localTx.id }, data: { status: 'FAILED' } }),
+          prisma.card.update({ where: { id: meta.cardId }, data: { status: 'CANCELLED' } }),
+        ]);
+      } else {
+        await prisma.transaction.update({ where: { id: localTx.id }, data: { status: 'FAILED' } });
+      }
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    logger.error({ err: e }, 'Webhook KKiaPay : erreur');
     next(e);
   }
 });

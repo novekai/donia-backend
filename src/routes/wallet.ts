@@ -8,6 +8,7 @@ import { prisma } from '../lib/prisma';
 import { env } from '../config/env';
 import { BadRequest, NotFound, Unauthorized } from '../lib/errors';
 import { createTransaction, generatePaymentToken, createPayout, startPayout, resolvePayoutMode } from '../services/fedapay';
+import { getActiveProvider } from '../services/paymentProvider';
 import { logger } from '../lib/logger';
 import { getNumericSetting } from '../services/platformSettings';
 
@@ -52,42 +53,39 @@ router.post('/topup/mobile-money', validate(topupMMSchema), async (req, res) => 
     },
   });
 
-  // 2. Create FedaPay transaction
+  // 2. Provider actif (FedaPay ou KKiaPay selon settings BO)
   try {
     const [firstname, ...rest] = user.name.split(' ');
     const lastname = rest.join(' ') || firstname;
-    // E.164 → strip + and country code for FedaPay phone_number (it expects local digits + country code separately)
-    const localNumber = user.phone.replace(/^\+\d{1,3}/, '').replace(/\D/g, '');
-    // Si EUR, on envoie le montant en EUR (avec parite XOF/EUR fixe 655.957)
-    // Si carte bancaire, on bascule en EUR pour ouvrir le formulaire carte FedaPay.
     const isCard = body.operator === 'card';
-    const fedaCurrency: 'XOF' | 'EUR' = body.currency === 'EUR' || isCard ? 'EUR' : 'XOF';
-    const fedaAmount =
-      fedaCurrency === 'EUR'
-        ? Math.round((body.amount / 655.957) * 100) / 100    // 2 decimales EUR
-        : Math.round(body.amount);                             // XOF entiers
-    const fedaTx = await createTransaction({
-      amount: fedaAmount,
-      currency: { iso: fedaCurrency },
+    const provider = await getActiveProvider();
+
+    const topup = await provider.createTopup({
+      amountFcfa: body.amount,
+      operator: body.operator,
+      country: body.country,
       description: `Recharge Donia · ${body.amount} FCFA${isCard ? ' (carte bancaire)' : ''}`,
+      currency: body.currency,
       customer: {
         firstname,
         lastname,
-        email: user.email ?? undefined,
-        phone_number: { number: localNumber, country: user.country.toLowerCase() },
+        email: user.email,
+        phone: user.phone,
       },
-      metadata: { donia_tx_id: localTx.id, operator: body.operator, currency: fedaCurrency },
+      metadata: { donia_tx_id: localTx.id, operator: body.operator },
     });
 
-    // 3. Generate payment URL
-    const token = await generatePaymentToken(fedaTx.id);
-
-    // 4. Link FedaPay tx ID to our local tx
     await prisma.transaction.update({
       where: { id: localTx.id },
       data: {
-        ref: String(fedaTx.id),
-        metadata: { operator: body.operator, country: body.country, fedapayTxId: fedaTx.id, paymentUrl: token.url },
+        ref: topup.providerTxId,
+        metadata: {
+          operator: body.operator,
+          country: body.country,
+          provider: provider.key,
+          providerTxId: topup.providerTxId,
+          paymentUrl: topup.paymentUrl,
+        },
       },
     });
 
@@ -95,11 +93,11 @@ router.post('/topup/mobile-money', validate(topupMMSchema), async (req, res) => 
       ok: true,
       txId: localTx.id,
       status: 'PENDING',
-      paymentUrl: token.url,        // Mobile opens this in a WebView
-      fedapayTxId: fedaTx.id,
+      paymentUrl: topup.paymentUrl,    // Mobile opens this in a WebView
+      provider: provider.key,
     });
   } catch (e) {
-    logger.error({ err: e, localTxId: localTx.id }, 'FedaPay createTransaction failed');
+    logger.error({ err: e, localTxId: localTx.id }, 'createTopup failed');
     await prisma.transaction.update({ where: { id: localTx.id }, data: { status: 'FAILED' } });
     throw BadRequest('Impossible de démarrer le paiement Mobile Money', 'PAYMENT_INIT_FAILED');
   }
@@ -265,71 +263,61 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
 
   const isBankCard = body.operator === 'bank_card';
 
-  // ── Tentative de payout automatique via FedaPay ──
-  // Conditions : Mobile Money + amount <= max_auto_payout + operateur/pays supporte +
-  // l'API Payouts est activee cote FedaPay merchant.
-  // Si rien de tout ca, on reste en PENDING manuel (workflow BO).
+  // ── Tentative de payout automatique via le provider actif (FedaPay ou KKiaPay) ──
+  // Conditions : Mobile Money + amount <= max_auto_payout + provider configure +
+  // API Payouts activee chez le PSP. Sinon : PENDING manuel (workflow BO).
   let autoTriggered = false;
   if (!isBankCard && body.phoneNumber) {
     const maxAuto = await getNumericSetting('max_auto_payout_amount', 50_000);
     if (body.amount <= maxAuto) {
-      const mode = resolvePayoutMode(body.operator, user.country);
-      if (mode) {
-        try {
-          const [firstname, ...rest] = user.name.split(' ');
-          const lastname = rest.join(' ') || firstname;
-          const localNumber = body.phoneNumber.replace(/^\+\d{1,3}/, '').replace(/\D/g, '');
+      try {
+        const [firstname, ...rest] = user.name.split(' ');
+        const lastname = rest.join(' ') || firstname;
+        const provider = await getActiveProvider();
 
-          const payout = await createPayout({
-            amount: Math.round(body.amount),
-            mode,
-            description: `Retrait Donia · ${body.amount} FCFA`,
-            customer: {
-              firstname,
-              lastname,
-              phone_number: { number: localNumber, country: user.country.toLowerCase() },
-            },
-            metadata: { donia_tx_id: result.id, kind: 'withdrawal' },
-          });
-          const started = await startPayout(payout.id);
+        const payout = await provider.createPayout({
+          amountFcfa: body.amount,
+          operator: body.operator,
+          country: user.country,
+          description: `Retrait Donia · ${body.amount} FCFA`,
+          customer: { firstname, lastname, phone: body.phoneNumber },
+          metadata: { donia_tx_id: result.id, kind: 'withdrawal' },
+        });
 
-          await prisma.transaction.update({
-            where: { id: result.id },
-            data: {
-              ref: String(payout.id),
-              metadata: {
-                ...((result.metadata as Record<string, unknown>) ?? {}),
-                fedapayPayoutId: payout.id,
-                payoutMode: mode,
-                payoutStatus: started.status,
-                autoTriggered: true,
-              },
+        await prisma.transaction.update({
+          where: { id: result.id },
+          data: {
+            ref: payout.providerPayoutId,
+            metadata: {
+              ...((result.metadata as Record<string, unknown>) ?? {}),
+              provider: provider.key,
+              providerPayoutId: payout.providerPayoutId,
+              payoutStatus: payout.status,
+              autoTriggered: true,
             },
-          });
-          autoTriggered = true;
-          logger.info({ payoutId: payout.id, txId: result.id, status: started.status }, '🚀 Payout auto FedaPay declenche');
-        } catch (e) {
-          // Fallback gracieux : si Payouts pas active OU echec API, on reste en PENDING manuel.
-          logger.warn(
-            { err: (e as Error).message, txId: result.id, operator: body.operator, country: user.country },
-            'Payout auto FedaPay echec, fallback manuel BO',
-          );
-          await prisma.transaction.update({
-            where: { id: result.id },
-            data: {
-              metadata: {
-                ...((result.metadata as Record<string, unknown>) ?? {}),
-                autoTriggerError: (e as Error).message,
-                autoTriggered: false,
-              },
-            },
-          });
-        }
-      } else {
+          },
+        });
+        autoTriggered = true;
         logger.info(
-          { operator: body.operator, country: user.country },
-          'Operateur/pays non supporte par FedaPay Payouts, fallback manuel BO',
+          { provider: provider.key, payoutId: payout.providerPayoutId, txId: result.id, status: payout.status },
+          '🚀 Payout auto declenche',
         );
+      } catch (e) {
+        // Fallback : Payouts pas active OU operateur non supporte → PENDING manuel.
+        logger.warn(
+          { err: (e as Error).message, txId: result.id, operator: body.operator, country: user.country },
+          'Payout auto echec, fallback manuel BO',
+        );
+        await prisma.transaction.update({
+          where: { id: result.id },
+          data: {
+            metadata: {
+              ...((result.metadata as Record<string, unknown>) ?? {}),
+              autoTriggerError: (e as Error).message,
+              autoTriggered: false,
+            },
+          },
+        });
       }
     }
   }

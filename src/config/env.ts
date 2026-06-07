@@ -38,6 +38,14 @@ const schema = z.object({
   FEDAPAY_ENV: z.enum(['sandbox', 'live']).default('sandbox'),
   FEDAPAY_WEBHOOK_SECRET: z.string().optional(),
 
+  // KKiaPay (PSP alternatif a FedaPay). Le provider actif est pilote depuis le BO
+  // via la setting `active_payment_provider`. Mettre les cles ici en .env mais pas
+  // besoin de les changer pour switcher (c'est instantane cote BO).
+  KKIAPAY_PUBLIC_KEY: z.string().optional(),
+  KKIAPAY_PRIVATE_KEY: z.string().optional(),
+  KKIAPAY_SECRET_KEY: z.string().optional(),     // signature webhook
+  KKIAPAY_ENV: z.enum(['sandbox', 'live']).default('sandbox'),
+
   RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().default('Donia <hello@doniia.com>'),
 

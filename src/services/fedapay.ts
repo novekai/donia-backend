@@ -5,6 +5,13 @@ import axios, { type AxiosInstance } from 'axios';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { env } from '../config/env';
 import { logger } from '../lib/logger';
+import type {
+  PaymentProvider,
+  PayoutInput,
+  PayoutResult,
+  TopupInput,
+  TopupResult,
+} from './paymentProvider';
 
 const BASE_URL =
   env.FEDAPAY_ENV === 'live'
@@ -250,3 +257,80 @@ function constantTimeHexEqual(a: string, b: string): boolean {
     return false;
   }
 }
+
+// ─────────────────────────── PROVIDER WRAPPER ───────────────────────────
+// Wrapper qui expose FedaPay via l'interface PaymentProvider unifiee.
+// Le code existant (webhook etc.) peut continuer a appeler createTransaction/
+// generatePaymentToken/createPayout directement.
+
+function fedapayIsConfigured(): boolean {
+  return Boolean(env.FEDAPAY_SECRET_KEY);
+}
+
+async function fedapayCreateTopup(input: TopupInput): Promise<TopupResult> {
+  // Pour les cartes bancaires, FedaPay demande currency=EUR pour ouvrir le formulaire carte.
+  const isCard = input.operator === 'card';
+  const fedaCurrency: 'XOF' | 'EUR' = input.currency === 'EUR' || isCard ? 'EUR' : 'XOF';
+  const FCFA_PER_EUR = 655.957;
+  const fedaAmount =
+    fedaCurrency === 'EUR'
+      ? Math.round((input.amountFcfa / FCFA_PER_EUR) * 100) / 100
+      : Math.round(input.amountFcfa);
+
+  // E.164 → strip + et indicatif pour FedaPay
+  const localNumber = input.customer.phone.replace(/^\+\d{1,3}/, '').replace(/\D/g, '');
+
+  const fedaTx = await createTransaction({
+    amount: fedaAmount,
+    currency: { iso: fedaCurrency },
+    description: input.description,
+    customer: {
+      firstname: input.customer.firstname,
+      lastname: input.customer.lastname,
+      email: input.customer.email ?? undefined,
+      phone_number: { number: localNumber, country: input.country.toLowerCase() },
+    },
+    metadata: { ...(input.metadata ?? {}), currency: fedaCurrency },
+  });
+  const token = await generatePaymentToken(fedaTx.id);
+  return { paymentUrl: token.url, providerTxId: String(fedaTx.id) };
+}
+
+async function fedapayCreatePayout(input: PayoutInput): Promise<PayoutResult> {
+  const mode = resolvePayoutMode(input.operator, input.country);
+  if (!mode) {
+    throw new Error(`FedaPay : operateur/pays non supporte (${input.operator}/${input.country})`);
+  }
+  const localNumber = input.customer.phone.replace(/^\+\d{1,3}/, '').replace(/\D/g, '');
+  const payout = await createPayout({
+    amount: Math.round(input.amountFcfa),
+    mode,
+    description: input.description,
+    customer: {
+      firstname: input.customer.firstname,
+      lastname: input.customer.lastname,
+      phone_number: { number: localNumber, country: input.country.toLowerCase() },
+    },
+    metadata: input.metadata,
+  });
+  const started = await startPayout(payout.id);
+  return {
+    providerPayoutId: String(payout.id),
+    status: mapFedaPayoutStatus(started.status),
+  };
+}
+
+function mapFedaPayoutStatus(s: FedapayPayoutStatus): PayoutResult['status'] {
+  if (s === 'approved' || s === 'sent') return 'approved';
+  if (s === 'declined' || s === 'canceled') return 'declined';
+  if (s === 'failed') return 'failed';
+  return 'pending';
+}
+
+export const fedapayProvider: PaymentProvider = {
+  key: 'fedapay',
+  isConfigured: fedapayIsConfigured,
+  createTopup: fedapayCreateTopup,
+  createPayout: fedapayCreatePayout,
+  verifyWebhookSignature,
+};
