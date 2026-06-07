@@ -9,6 +9,7 @@ import { env } from '../config/env';
 import { BadRequest, NotFound, Unauthorized } from '../lib/errors';
 import { createTransaction, generatePaymentToken } from '../services/fedapay';
 import { logger } from '../lib/logger';
+import { getNumericSetting } from '../services/platformSettings';
 
 const router = Router();
 router.use(requireAuth);
@@ -201,8 +202,9 @@ router.post('/topup/code', validate(topupCodeSchema), async (req, res) => {
 // soit carte bancaire (operator='bank_card' + accountNumber libre = IBAN, RIB, ou
 // numéro de carte). Le destinataire est validé par Paul cote admin avant payout.
 const withdrawSchema = z.object({
-  amount: z.number().positive(),                       // min 1 FCFA (plus de plancher 500)
+  amount: z.number().positive(),                       // toujours en FCFA cote backend (min pilotable depuis le BO)
   operator: z.string().min(2).max(30),                 // mtn, moov, orange, wave, bank_card
+  currency: z.enum(['XOF', 'EUR']).default('XOF'),     // devise affichee cote mobile (parite fixe 655.957)
   // Soit phoneNumber (Mobile Money), soit accountNumber (carte bancaire / IBAN)
   phoneNumber: z.string().regex(/^\+\d{8,15}$/).optional(),
   accountNumber: z.string().min(4).max(34).optional(), // IBAN max 34, carte 16-19
@@ -226,6 +228,14 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
     );
   }
 
+  const minWithdrawal = await getNumericSetting('min_withdrawal_amount', 500);
+  if (body.amount < minWithdrawal) {
+    throw BadRequest(
+      `Le montant minimum d'un retrait est de ${minWithdrawal.toLocaleString('fr-FR')} FCFA.`,
+      'AMOUNT_TOO_LOW',
+    );
+  }
+
   const result = await prisma.$transaction(async (tx) => {
     const wallet = await tx.wallet.findUniqueOrThrow({ where: { userId: req.auth!.userId } });
     if (Number(wallet.balancePrincipal) < body.amount) {
@@ -243,6 +253,7 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
         status: 'PENDING',
         metadata: {
           operator: body.operator,
+          currency: body.currency,
           phoneNumber: body.phoneNumber ?? null,
           accountNumber: body.accountNumber ?? null,
           requestedAt: new Date().toISOString(),

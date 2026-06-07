@@ -6,7 +6,8 @@ import { prisma } from '../lib/prisma';
 
 export const SETTING_DEFAULTS = {
   commission_rate: 5,           // % prélevé sur conversion (0–100)
-  min_card_amount: 500,         // FCFA
+  min_card_amount: 500,         // FCFA — montant minimum d'envoi d'une carte
+  min_withdrawal_amount: 500,   // FCFA — montant minimum d'un retrait
   max_amount_no_kyc: 50_000,    // FCFA — au-delà : KYC obligatoire
   referral_lifetime_active: true,
   channel_push: true,
