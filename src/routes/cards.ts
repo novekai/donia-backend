@@ -10,7 +10,7 @@ import { generateRedeemCode } from '../lib/codes';
 import { BadRequest, Forbidden, NotFound, Unauthorized } from '../lib/errors';
 import { sendCardEmail, sendCardWhatsApp } from '../services/notifier';
 import { sendExpoPush } from '../services/push';
-import { createTransaction, generatePaymentToken } from '../services/fedapay';
+import { getActiveProvider } from '../services/paymentProvider';
 import { logger } from '../lib/logger';
 import { getNumericSetting } from '../services/platformSettings';
 
@@ -277,36 +277,43 @@ router.post('/pay-mobile-money', validate(createSchema), async (req, res) => {
   try {
     const [firstname, ...rest] = user.name.split(' ');
     const lastname = rest.join(' ') || firstname;
-    const localNumber = user.phone.replace(/^\+\d{1,3}/, '').replace(/\D/g, '');
-    const fedaTx = await createTransaction({
-      amount: Math.round(body.amount),
+    const provider = await getActiveProvider();
+    const topup = await provider.createTopup({
+      amountFcfa: body.amount,
+      operator: 'mobile_money',
+      country: user.country,
       description: `Cadeau Donia · ${body.amount} FCFA`,
+      currency: 'XOF',
       customer: {
         firstname,
         lastname,
-        email: user.email ?? undefined,
-        phone_number: { number: localNumber, country: user.country.toLowerCase() },
+        email: user.email,
+        phone: user.phone,
       },
       metadata: { donia_tx_id: localTx.id, kind: 'card_payment', cardId: card.id },
     });
 
-    const token = await generatePaymentToken(fedaTx.id);
-
     await prisma.transaction.update({
       where: { id: localTx.id },
       data: {
-        ref: String(fedaTx.id),
-        metadata: { kind: 'card_payment', cardId: card.id, fedapayTxId: fedaTx.id, paymentUrl: token.url },
+        ref: topup.providerTxId,
+        metadata: {
+          kind: 'card_payment',
+          cardId: card.id,
+          provider: provider.key,
+          providerTxId: topup.providerTxId,
+          paymentUrl: topup.paymentUrl,
+        },
       },
     });
 
     res.status(201).json({
       card,
-      paymentUrl: token.url,
-      fedapayTxId: fedaTx.id,
+      paymentUrl: topup.paymentUrl,
+      provider: provider.key,
     });
   } catch (e) {
-    logger.error({ err: e, cardId: card.id }, 'FedaPay createTransaction failed for card payment');
+    logger.error({ err: e, cardId: card.id }, 'createTopup failed for card payment');
     await prisma.$transaction([
       prisma.transaction.update({ where: { id: localTx.id }, data: { status: 'FAILED' } }),
       prisma.card.update({ where: { id: card.id }, data: { status: 'CANCELLED' } }),
