@@ -415,6 +415,7 @@ model AnonymousMessage {
   senderIpHash    String?                                          // sha256(ip + salt)
   senderUserAgent String?
   senderEmail     String?                                          // captured for "Cercle" CRM (Phase 5)
+  senderPhone     String?                                          // E.164, alternative au senderEmail (capture obligatoire cote web)
   status          AnonymousMessageStatus  @default(VALID)
   moderationScore Decimal?                @db.Decimal(4, 3)        // 0..1 from auto moderation
   isFavorite      Boolean                 @default(false)

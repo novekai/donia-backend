@@ -86,9 +86,13 @@ router.get('/anonymes/:code', async (req, res) => {
 // ── POST /public/anonymes/:code/message — envoyer un message anonyme ──
 const sendSchema = z.object({
   content: z.string().min(1).max(500),
-  senderEmail: z.string().email().optional(),           // optional capture for "Cercle" (Phase 5)
+  senderEmail: z.string().email().optional(),
+  senderPhone: z.string().regex(/^\+\d{8,15}$/).optional(),  // E.164 WhatsApp
   marketingOptIn: z.boolean().default(false),
   captchaToken: z.string().optional(),                  // Turnstile token (verified server-side)
+}).refine((d) => Boolean(d.senderEmail || d.senderPhone), {
+  message: "Indique soit un email soit un numero WhatsApp pour pouvoir te recontacter.",
+  path: ['senderEmail'],
 });
 
 router.post(
@@ -134,7 +138,8 @@ router.post(
         content: body.content,
         senderIpHash: ipHash,
         senderUserAgent: req.get('user-agent') ?? null,
-        senderEmail: body.marketingOptIn && body.senderEmail ? body.senderEmail : body.senderEmail ?? null,
+        senderEmail: body.senderEmail ?? null,
+        senderPhone: body.senderPhone ?? null,
         status,
         moderationScore: mod.score,
       },
