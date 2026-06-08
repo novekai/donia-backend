@@ -21,15 +21,23 @@ export function phoneToChatId(phoneE164: string): string | null {
 type SendTextOk = { id: string };
 
 /**
- * Pour les numéros béninois (+229), certains comptes WhatsApp sont enregistrés
- * sous l'ancien format à 8 chiffres (sans le préfixe 01 ajouté en 2021), d'autres
- * sous le nouveau format à 10 chiffres avec le 01.
+ * Pour les numéros béninois (+229), la majorité des comptes WhatsApp sont
+ * historiquement enregistrés sous l'ancien format à 8 chiffres (sans le préfixe
+ * 01 ajouté en 2021). On strip donc systématiquement le 01 pour WAHA, avec un
+ * fallback au format avec 01 si le compte est introuvable sous le format strip.
  *
- * Cette fonction retourne une variante alternative à essayer en cas d'échec :
- * - +22901XXXXXXXX (10 chiffres locaux) → +229XXXXXXXX (en retirant le 01)
- * - +229XXXXXXXX (8 chiffres locaux) → +22901XXXXXXXX (en ajoutant le 01)
- * Pour les autres pays, renvoie null (pas de retry).
+ * preferredBeninFormat : si le numéro est +22901XXXXXXXX, renvoie +229XXXXXXXX.
+ * beninRetryVariant : si on a essayé le format A, renvoie le format B.
  */
+export function preferredBeninFormat(phoneE164: string): string | null {
+  if (!phoneE164.startsWith('+229')) return null;
+  const local = phoneE164.slice(4).replace(/\D/g, '');
+  if (local.startsWith('01') && local.length === 10) {
+    return `+229${local.slice(2)}`;
+  }
+  return null;
+}
+
 export function beninRetryVariant(phoneE164: string): string | null {
   if (!phoneE164.startsWith('+229')) return null;
   const local = phoneE164.slice(4).replace(/\D/g, '');
@@ -81,11 +89,18 @@ export async function checkWhatsAppExists(phoneE164: string): Promise<boolean | 
  * - Si la vérification échoue (WAHA down, …), on retourne le numéro original (let it try anyway)
  */
 export async function resolveWhatsAppNumber(phoneE164: string): Promise<string | null> {
-  const exists = await checkWhatsAppExists(phoneE164);
-  if (exists === true) return phoneE164;
-  if (exists === null) return phoneE164; // pas pu vérifier → on tente quand même
-  // exists === false → tenter la variante
-  const variant = beninRetryVariant(phoneE164);
+  // Priorité Bénin : si le numéro a un préfixe 01, on tente d'abord SANS le 01
+  // (ancien format 8 chiffres, majorité des comptes WhatsApp BJ historiques).
+  const preferred = preferredBeninFormat(phoneE164) ?? phoneE164;
+
+  const exists = await checkWhatsAppExists(preferred);
+  if (exists === true) return preferred;
+  if (exists === null) return preferred; // pas pu vérifier → on tente quand même
+
+  // exists === false → tenter la variante alternative
+  // Si on a déjà strippé le 01, la variante c'est le format original avec 01
+  // Sinon, on calcule la variante via beninRetryVariant
+  const variant = preferred !== phoneE164 ? phoneE164 : beninRetryVariant(phoneE164);
   if (!variant) return null;
   const altExists = await checkWhatsAppExists(variant);
   if (altExists === true) return variant;
