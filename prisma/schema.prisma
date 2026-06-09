@@ -431,6 +431,51 @@ model AnonymousMessage {
   @@index([status])
 }
 
+// ─────────────────────────── NEWSLETTER ───────────────────────────
+// Abonnes capturés via popup du site web (donia.com) ou autres canaux.
+// Source : 'popup' | 'footer' | 'blog' | 'api'.
+model NewsletterSubscriber {
+  id             String    @id @default(cuid())
+  email          String    @unique
+  source         String    @default("popup")
+  ipHash         String?                                    // sha256(ip + salt)
+  country        String?                                    // ISO-2, déduit de l'IP
+  referrer       String?                                    // page d'arrivée
+  utmSource      String?
+  utmMedium      String?
+  utmCampaign    String?
+  userAgent      String?
+  unsubscribedAt DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([createdAt(sort: Desc)])
+  @@index([source])
+}
+
+// ─────────────────────────── SITE VISITS (analytics anonyme) ───────────────────────────
+// Tracking anonyme du site web. Aucune PII. Utilisé pour analytics dans le BO.
+model SiteVisit {
+  id          String   @id @default(cuid())
+  path        String                                        // ex: "/", "/blog", "/blog/xxx"
+  sessionId   String?                                       // identifiant aléatoire frontale (localStorage)
+  ipHash      String?
+  country     String?                                       // ISO-2
+  referrer    String?                                       // d'où vient le visiteur
+  utmSource   String?
+  utmMedium   String?
+  utmCampaign String?
+  deviceType  String?                                       // 'mobile' | 'tablet' | 'desktop'
+  os          String?                                       // 'iOS' | 'Android' | 'Windows' | 'macOS' | 'Linux'
+  browser     String?                                       // 'Chrome' | 'Safari' | 'Firefox' | 'Edge' | ...
+  language    String?                                       // ex: 'fr-FR'
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+  @@index([path])
+  @@index([country])
+  @@index([sessionId])
+}
+
 // ─────────────────────────── PLATFORM SETTINGS ───────────────────────────
 // Generic key/value store for editable platform-wide settings (commission %,
 // min card amount, max without KYC, etc.). Schema-less on purpose so we can

@@ -24,6 +24,7 @@ import kycRoutes from './routes/kyc';
 import webhooksRoutes from './routes/webhooks';
 import anonymesRoutes from './routes/anonymes';
 import anonymesPublicRoutes from './routes/anonymes-public';
+import publicAnalyticsRoutes from './routes/public-analytics';
 import pushRoutes from './routes/push';
 import articlesRoutes from './routes/articles';
 import adminAuthRoutes from './routes/admin/auth';
@@ -38,6 +39,7 @@ import adminCardTemplatesRoutes from './routes/admin/card-templates';
 import adminWhatsappRoutes from './routes/admin/whatsapp';
 import adminCirclesRoutes from './routes/admin/circles';
 import adminBirthdayCampaignsRoutes from './routes/admin/birthday-campaigns';
+import adminAnalyticsRoutes from './routes/admin/analytics';
 
 export function buildApp(): Application {
   const app = express();
@@ -83,8 +85,9 @@ export function buildApp(): Application {
   app.use('/v1/anonymes', anonymesRoutes);
   app.use('/v1/push', pushRoutes);
 
-  // Public Anonymes (no auth — used by doniia.com/a/[CODE] website page)
+  // Public Anonymes + analytics + newsletter (no auth — used by doniia.com)
   app.use('/v1/public', anonymesPublicRoutes);
+  app.use('/v1/public', publicAnalyticsRoutes);
 
   // Public blog (no auth — used by doniia.com/#blog and /blog/[slug])
   app.use('/v1/articles', articlesRoutes);
@@ -106,6 +109,7 @@ export function buildApp(): Application {
   app.use('/v1/admin/whatsapp', adminWhatsappRoutes);
   app.use('/v1/admin/circles', adminCirclesRoutes);
   app.use('/v1/admin/birthday-campaigns', adminBirthdayCampaignsRoutes);
+  app.use('/v1/admin', adminAnalyticsRoutes);
 
   app.use(notFoundHandler);
   app.use(errorHandler);
