@@ -321,16 +321,20 @@ model Referral {
 // ─────────────────────────── CAGNOTTE ───────────────────────────
 
 model Cagnotte {
-  id           String          @id @default(cuid())
-  ownerId      String
-  title        String
-  description  String?
-  goalAmount   Decimal         @db.Decimal(14, 2)
-  totalRaised  Decimal         @default(0) @db.Decimal(14, 2)
-  deadline     DateTime?
-  status       CagnotteStatus  @default(ACTIVE)
-  createdAt    DateTime        @default(now())
-  updatedAt    DateTime        @updatedAt
+  id                String          @id @default(cuid())
+  ownerId           String
+  title             String
+  description       String?
+  goalAmount        Decimal         @db.Decimal(14, 2)
+  totalRaised       Decimal         @default(0) @db.Decimal(14, 2)
+  deadline          DateTime?
+  status            CagnotteStatus  @default(ACTIVE)
+  publicCode        String?         @unique                       // 8 chars partage public doniia.com/c/<code>
+  commissionPercent Decimal         @default(3.00) @db.Decimal(5, 2) // % preleve au retrait par lorganisateur
+  withdrawnAt       DateTime?                                       // null si jamais retiré
+  withdrawnAmount   Decimal?        @db.Decimal(14, 2)              // net recu par lorganisateur (apres commission)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
 
   owner         User                   @relation("owner", fields: [ownerId], references: [id])
   contributions CagnotteContribution[]
@@ -340,17 +344,23 @@ model Cagnotte {
 }
 
 model CagnotteContribution {
-  id            String   @id @default(cuid())
-  cagnotteId    String
-  contributorId String
-  amount        Decimal  @db.Decimal(14, 2)
-  message       String?
-  createdAt     DateTime @default(now())
+  id               String   @id @default(cuid())
+  cagnotteId       String
+  contributorId    String?                                          // null = contributeur public sans compte
+  contributorName  String?                                          // requis si pas de contributorId
+  contributorPhone String?                                          // E.164 pour notifier (cloture cagnotte)
+  amount           Decimal  @db.Decimal(14, 2)
+  message          String?
+  txId             String?                                          // FedaPay/KKiaPay txId pour contributions publiques
+  status           String   @default("CONFIRMED")                   // 'PENDING' | 'CONFIRMED' | 'FAILED'
+  createdAt        DateTime @default(now())
 
   cagnotte    Cagnotte @relation(fields: [cagnotteId], references: [id], onDelete: Cascade)
-  contributor User     @relation(fields: [contributorId], references: [id])
+  contributor User?    @relation(fields: [contributorId], references: [id])
 
   @@index([cagnotteId])
+  @@index([txId])
+  @@index([status])
 }
 
 // ─────────────────────────── KYC ───────────────────────────

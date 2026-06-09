@@ -25,6 +25,7 @@ import webhooksRoutes from './routes/webhooks';
 import anonymesRoutes from './routes/anonymes';
 import anonymesPublicRoutes from './routes/anonymes-public';
 import publicAnalyticsRoutes from './routes/public-analytics';
+import publicCagnottesRoutes from './routes/public-cagnottes';
 import pushRoutes from './routes/push';
 import articlesRoutes from './routes/articles';
 import adminAuthRoutes from './routes/admin/auth';
@@ -89,6 +90,7 @@ export function buildApp(): Application {
   // Public Anonymes + analytics + newsletter (no auth — used by doniia.com)
   app.use('/v1/public', anonymesPublicRoutes);
   app.use('/v1/public', publicAnalyticsRoutes);
+  app.use('/v1/public', publicCagnottesRoutes);
 
   // Public blog (no auth — used by doniia.com/#blog and /blog/[slug])
   app.use('/v1/articles', articlesRoutes);

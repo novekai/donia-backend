@@ -43,6 +43,17 @@ router.get('/', validate(listSchema, 'query'), async (req, res) => {
     prisma.cagnotte.aggregate({ _sum: { totalRaised: true } }),
   ]);
 
+  // Commissions cumulees Donia : somme des withdrawnAmount - withdrawn percent
+  const closedWithdrawn = await prisma.cagnotte.findMany({
+    where: { withdrawnAt: { not: null } },
+    select: { totalRaised: true, withdrawnAmount: true },
+  });
+  const totalCommissions = closedWithdrawn.reduce((acc, c) => {
+    const gross = Number(c.totalRaised);
+    const net = Number(c.withdrawnAmount ?? 0);
+    return acc + (gross - net);
+  }, 0);
+
   res.json({
     items: slice.map((c) => ({
       id: c.id,
@@ -52,12 +63,20 @@ router.get('/', validate(listSchema, 'query'), async (req, res) => {
       totalRaised: Number(c.totalRaised),
       deadline: c.deadline,
       status: c.status,
+      publicCode: c.publicCode,
+      commissionPercent: Number(c.commissionPercent),
+      withdrawnAt: c.withdrawnAt,
+      withdrawnAmount: c.withdrawnAmount ? Number(c.withdrawnAmount) : null,
       createdAt: c.createdAt,
       owner: c.owner,
       contributionCount: c._count.contributions,
     })),
     nextCursor: hasMore ? slice[slice.length - 1]?.id ?? null : null,
-    stats: { total, active, closed, cancelled, totalRaisedAll: Number(totalRaisedAll._sum.totalRaised ?? 0) },
+    stats: {
+      total, active, closed, cancelled,
+      totalRaisedAll: Number(totalRaisedAll._sum.totalRaised ?? 0),
+      totalCommissions,
+    },
   });
 });
 

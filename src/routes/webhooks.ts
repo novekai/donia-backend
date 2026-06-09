@@ -64,8 +64,51 @@ router.post('/fedapay', async (req: Request, res: Response, next: NextFunction) 
     const isApproved = eventName === 'transaction.approved' || fedaTx.status === 'approved' || fedaTx.status === 'transferred';
     const isDeclined = eventName === 'transaction.declined' || fedaTx.status === 'declined' || fedaTx.status === 'canceled';
 
-    const meta = (localTx.metadata as { kind?: string; cardId?: string } | null) ?? {};
+    const meta = (localTx.metadata as { kind?: string; cardId?: string; cagnotteId?: string; contributionId?: string } | null) ?? {};
     const isCardPayment = meta.kind === 'card_payment';
+    const isCagnottePublic = meta.kind === 'cagnotte_public_contribution';
+
+    // Branche cagnotte publique : on confirme la contribution + incremente totalRaised
+    if (isCagnottePublic && meta.cagnotteId && meta.contributionId) {
+      if (isApproved) {
+        await prisma.$transaction([
+          prisma.transaction.update({ where: { id: localTx.id }, data: { status: 'SUCCESS' } }),
+          prisma.cagnotteContribution.update({ where: { id: meta.contributionId }, data: { status: 'CONFIRMED' } }),
+          prisma.cagnotte.update({ where: { id: meta.cagnotteId }, data: { totalRaised: { increment: new Prisma.Decimal(localTx.amount) } } }),
+        ]);
+        logger.info({ contributionId: meta.contributionId, cagnotteId: meta.cagnotteId, amount: localTx.amount.toString() }, '🎁 Cagnotte contribution publique CONFIRMED');
+        // Notif a l organisateur (push + notification table)
+        try {
+          const cagnotte = await prisma.cagnotte.findUnique({ where: { id: meta.cagnotteId }, select: { ownerId: true, title: true } });
+          if (cagnotte) {
+            await prisma.notification.create({
+              data: {
+                userId: cagnotte.ownerId,
+                type: 'cagnotte_contribution',
+                title: 'Nouvelle contribution 🎁',
+                body: `Quelqu'un a contribué ${Number(localTx.amount).toLocaleString('fr-FR').replace(/,/g, ' ')} FCFA à "${cagnotte.title}".`,
+                emoji: '🎁',
+                data: { cagnotteId: meta.cagnotteId },
+              },
+            });
+            await sendExpoPush({
+              userId: cagnotte.ownerId,
+              title: 'Nouvelle contribution 🎁',
+              body: `+${Number(localTx.amount).toLocaleString('fr-FR').replace(/,/g, ' ')} FCFA sur "${cagnotte.title}"`,
+              data: { type: 'cagnotte_contribution', cagnotteId: meta.cagnotteId },
+            });
+          }
+        } catch (e) {
+          logger.warn({ err: e }, 'cagnotte push notif failed');
+        }
+      } else if (isDeclined) {
+        await prisma.$transaction([
+          prisma.transaction.update({ where: { id: localTx.id }, data: { status: 'FAILED' } }),
+          prisma.cagnotteContribution.update({ where: { id: meta.contributionId }, data: { status: 'FAILED' } }),
+        ]);
+      }
+      return res.json({ ok: true });
+    }
 
     if (isApproved) {
       if (isCardPayment && meta.cardId) {
