@@ -21,12 +21,16 @@ const subscribeLimiter = rateLimit({
 });
 
 const subscribeSchema = z.object({
-  email: z.string().email().max(200),
+  email: z.string().email().max(200).optional(),
+  phone: z.string().regex(/^\+\d{8,15}$/).optional(),
   source: z.string().max(40).default('popup'),
   utmSource: z.string().max(80).optional(),
   utmMedium: z.string().max(80).optional(),
   utmCampaign: z.string().max(80).optional(),
   referrer: z.string().max(500).optional(),
+}).refine((d) => Boolean(d.email || d.phone), {
+  message: "Email ou numero WhatsApp requis.",
+  path: ['email'],
 });
 
 router.post('/newsletter/subscribe', subscribeLimiter, validate(subscribeSchema), async (req, res) => {
@@ -36,7 +40,8 @@ router.post('/newsletter/subscribe', subscribeLimiter, validate(subscribeSchema)
   try {
     await prisma.newsletterSubscriber.create({
       data: {
-        email: body.email.trim().toLowerCase(),
+        email: body.email ? body.email.trim().toLowerCase() : null,
+        phone: body.phone ?? null,
         source: body.source,
         ipHash: sig.ipHash,
         country: sig.country,
@@ -47,7 +52,7 @@ router.post('/newsletter/subscribe', subscribeLimiter, validate(subscribeSchema)
         userAgent: sig.userAgent,
       },
     });
-    logger.info({ email: body.email, source: body.source }, '📧 Newsletter subscriber added');
+    logger.info({ email: body.email, phone: body.phone, source: body.source }, '📧 Newsletter subscriber added');
     res.status(201).json({ ok: true });
   } catch (e) {
     // Dedupe : si email deja inscrit, on renvoie ok silencieusement (pas d'info-leak).

@@ -441,7 +441,8 @@ model AnonymousMessage {
 // Source : 'popup' | 'footer' | 'blog' | 'api'.
 model NewsletterSubscriber {
   id             String    @id @default(cuid())
-  email          String    @unique
+  email          String?   @unique                          // optionnel - email OU phone
+  phone          String?   @unique                          // E.164 WhatsApp
   source         String    @default("popup")
   ipHash         String?                                    // sha256(ip + salt)
   country        String?                                    // ISO-2, déduit de l'IP
