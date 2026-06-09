@@ -128,12 +128,15 @@ router.post('/cagnottes/:code/contribute', contributeLimiter, validate(contribut
     const provider = await getActiveProvider();
     const [firstname, ...rest] = body.name.split(' ');
     const lastname = rest.join(' ') || firstname;
+    // URL de retour apres paiement : page de remerciement Donia avec CTA telechargement app
+    const callbackUrl = `https://doniia.com/c/${encodeURIComponent(cagnotte.publicCode ?? cagnotte.id)}/merci?contrib=${encodeURIComponent(contribution.id)}`;
     const topup = await provider.createTopup({
       amountFcfa: body.amount,
       operator: body.operator,
       country: body.country,
       description: `Cagnotte ${cagnotte.title}`,
       currency: 'XOF',
+      callbackUrl,
       customer: { firstname, lastname, phone: body.phone, email: null },
       metadata: { donia_tx_id: localTx.id, kind: 'cagnotte_public_contribution', cagnotteId: cagnotte.id, contributionId: contribution.id },
     });

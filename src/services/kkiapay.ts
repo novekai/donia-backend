@@ -62,6 +62,7 @@ async function createTopup(input: TopupInput): Promise<TopupResult> {
     email: input.customer.email ?? undefined,
     phone: input.customer.phone,
     country: input.country.toUpperCase(),
+    callback: input.callbackUrl,
     data: JSON.stringify(input.metadata ?? {}),
     sandbox: env.KKIAPAY_ENV !== 'live',
   };

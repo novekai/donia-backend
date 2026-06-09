@@ -18,6 +18,7 @@ export type TopupInput = {
   country: string;               // ISO-2, ex 'BJ'
   description: string;
   currency: 'XOF' | 'EUR';       // devise affichee a l'user (carte = EUR oblige)
+  callbackUrl?: string;          // URL de retour apres paiement (page de confirmation)
   customer: {
     firstname?: string;
     lastname?: string;

@@ -284,6 +284,7 @@ async function fedapayCreateTopup(input: TopupInput): Promise<TopupResult> {
     amount: fedaAmount,
     currency: { iso: fedaCurrency },
     description: input.description,
+    callback_url: input.callbackUrl,
     customer: {
       firstname: input.customer.firstname,
       lastname: input.customer.lastname,
