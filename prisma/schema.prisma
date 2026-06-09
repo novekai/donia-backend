@@ -124,6 +124,11 @@ model User {
   referredBy   String?                                 // referralCode of parrain
   birthdayOptIn Boolean    @default(true)             // recevoir des rappels d'anniversaire de ses proches
   birthdayPublic Boolean   @default(false)           // afficher publiquement "C'est mon anniv" le jour J + recevoir des cartes spontanées
+  birthdayNote   String?                              // note libre affichee sur le profil (gouts, hobbies...)
+  birthdayShowAge Boolean  @default(true)             // exposer l'age dans la liste publique
+  birthdayAutoCard Boolean @default(false)            // envoie auto une mini carte le jour J a ses contacts qui fêtent
+  birthdayAutoCardAmount Int @default(500)            // montant de la carte auto (FCFA)
+  birthdayVisibility String @default("contacts")      // 'public' | 'contacts' | 'private'
   // Confidentialité — qui peut voir mon email/téléphone/avatar quand un proche cherche par numéro
   showEmailPublic    Boolean @default(false)         // affiché aux destinataires de mes cartes
   showPhonePublic    Boolean @default(true)          // visible aux contacts (E.164 sans masque)
