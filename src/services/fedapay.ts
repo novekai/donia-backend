@@ -206,6 +206,27 @@ export function resolvePayoutMode(operator: string, country: string): FedapayPay
   }
 }
 
+// ─────────────────────────── BALANCES (compte marchand) ───────────────────────────
+// Doc: GET /v1/balances → liste des soldes (XOF, EUR si actif).
+// On retourne le total dispo en XOF (mode= "amount" en XOF).
+export type FedapayBalance = {
+  currency: 'XOF' | 'XAF' | 'EUR' | 'USD';
+  amount: number;        // solde disponible
+  pendingAmount?: number; // en attente (optionnel selon API)
+};
+
+export async function fetchBalances(): Promise<FedapayBalance[]> {
+  const client = getClient();
+  const { data } = await client.get('/v1/balances');
+  const raw = data?.['v1/balances'] ?? data?.balances ?? data;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((b: Record<string, unknown>) => ({
+    currency: ((b.currency as { iso?: string })?.iso ?? b.currency ?? 'XOF') as FedapayBalance['currency'],
+    amount: Number(b.amount ?? 0),
+    pendingAmount: b.pending_amount !== undefined ? Number(b.pending_amount) : undefined,
+  }));
+}
+
 // ─────────────────────────── WEBHOOK SIGNATURE VERIFY ───────────────────────────
 
 // FedaPay envoie une signature au format Stripe-style :

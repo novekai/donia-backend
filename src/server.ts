@@ -42,6 +42,7 @@ import adminCirclesRoutes from './routes/admin/circles';
 import adminBirthdayCampaignsRoutes from './routes/admin/birthday-campaigns';
 import adminAnalyticsRoutes from './routes/admin/analytics';
 import adminCagnottesRoutes from './routes/admin/cagnottes';
+import adminFinanceRoutes from './routes/admin/finance';
 
 export function buildApp(): Application {
   const app = express();
@@ -114,6 +115,7 @@ export function buildApp(): Application {
   app.use('/v1/admin/birthday-campaigns', adminBirthdayCampaignsRoutes);
   app.use('/v1/admin', adminAnalyticsRoutes);
   app.use('/v1/admin/cagnottes', adminCagnottesRoutes);
+  app.use('/v1/admin/finance', adminFinanceRoutes);
 
   app.use(notFoundHandler);
   app.use(errorHandler);
