@@ -164,10 +164,17 @@ export async function createPayout(input: CreatePayoutInput): Promise<FedapayPay
 }
 
 // 2. Declenche l'envoi effectif. FedaPay enverra ensuite le webhook payout.approved / payout.declined.
+// IMPORTANT : la doc FedaPay specifie /v1/payouts/start (sans ID dans l URL) avec un body
+// { payouts: [{ id }] } pour batcher plusieurs payouts. Pour un payout simple on envoie
+// un tableau d un seul element. Source: https://docs.fedapay.com/integration-api/fr/payouts-management-fr
 export async function startPayout(payoutId: number): Promise<FedapayPayout> {
   const client = getClient();
-  const { data } = await client.put(`/v1/payouts/${payoutId}/start`, {});
-  return (data?.['v1/payout'] ?? data) as FedapayPayout;
+  const { data } = await client.put('/v1/payouts/start', { payouts: [{ id: payoutId }] });
+  // La reponse peut etre soit un objet (payout simple) soit un tableau (batch).
+  // On extrait le premier element du tableau si necessaire.
+  const raw = data?.['v1/payouts'] ?? data?.['v1/payout'] ?? data?.payouts ?? data;
+  const payout = Array.isArray(raw) ? raw[0] : raw;
+  return payout as FedapayPayout;
 }
 
 // Mappe operateur Donia + pays user vers le mode FedaPay.
