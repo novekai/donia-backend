@@ -11,6 +11,7 @@ import { requireAuth } from '../middleware/auth';
 import { BadRequest, Conflict, NotFound, Unauthorized } from '../lib/errors';
 import { sendOtp } from '../services/notifier';
 import { sendExpoPush } from '../services/push';
+import { logger } from '../lib/logger';
 
 const router = Router();
 
@@ -142,6 +143,7 @@ router.post('/signup', validate(signupSchema), async (req, res) => {
   });
 
   // Envoie l'OTP sur le WhatsApp du futur compte. L'OTP est lié au contact (whatsapp).
+  // Si un email a été fourni, on envoie AUSSI le même code par email (redondance UX).
   const target = body.whatsapp ?? body.phone;
   const code = generateOtp(env.OTP_CODE_LENGTH);
   await prisma.otp.create({
@@ -152,15 +154,50 @@ router.post('/signup', validate(signupSchema), async (req, res) => {
       expiresAt: new Date(Date.now() + env.OTP_TTL_MINUTES * 60_000),
     },
   });
+
+  // Tente WhatsApp en premier — si l email est fourni, on accepte que WhatsApp echoue
+  // tant que l email passe (l user pourra confirmer avec le code reçu par mail).
+  let waOk = false;
+  let waErr: Error | null = null;
   try {
     await sendOtp(target, 'WHATSAPP', code);
+    waOk = true;
   } catch (e) {
-    // L'OTP est créé, l'utilisateur peut renvoyer. Mais on remonte l'erreur pour qu'il
-    // sache que le WhatsApp ne marche pas (mauvais numéro, pas de compte WA, etc).
-    throw BadRequest((e as Error).message);
+    waErr = e as Error;
   }
 
-  res.status(202).json({ ok: true, pendingPhone: body.phone, otpTarget: target });
+  // Si email fourni, envoie le MEME code par email aussi (1 seul OTP en DB).
+  // Aussi cree un Otp avec channel EMAIL pour permettre la confirmation par email.
+  let emailOk = false;
+  if (body.email) {
+    try {
+      await prisma.otp.create({
+        data: {
+          contact: body.email,
+          channel: 'EMAIL',
+          codeHash: sha256(code),
+          expiresAt: new Date(Date.now() + env.OTP_TTL_MINUTES * 60_000),
+        },
+      });
+      await sendOtp(body.email, 'EMAIL', code);
+      emailOk = true;
+    } catch (e) {
+      logger.warn({ err: (e as Error).message, email: body.email }, 'Email OTP send failed (non-fatal si WhatsApp OK)');
+    }
+  }
+
+  // Si AUCUN des deux canaux na marche, remonte l erreur WhatsApp
+  if (!waOk && !emailOk) {
+    throw BadRequest(waErr?.message ?? 'Impossible denvoyer le code par WhatsApp ni email.');
+  }
+
+  res.status(202).json({
+    ok: true,
+    pendingPhone: body.phone,
+    otpTarget: target,
+    sentByWhatsApp: waOk,
+    sentByEmail: emailOk,
+  });
 });
 
 // POST /v1/auth/signup/confirm — étape 2 : valide l'OTP et crée le vrai User.
