@@ -304,8 +304,21 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
         );
       } catch (e) {
         // Fallback : Payouts pas active OU operateur non supporte → PENDING manuel.
+        // On capture le maximum de details pour debug (URL appelee, body de reponse PSP).
+        type AxiosLikeErr = { response?: { status?: number; data?: unknown; config?: { url?: string; baseURL?: string; method?: string } } };
+        const ax = e as AxiosLikeErr;
+        const errUrl = ax.response?.config ? `${ax.response.config.method?.toUpperCase() ?? '?'} ${ax.response.config.baseURL ?? ''}${ax.response.config.url ?? ''}` : undefined;
+        const errBody = ax.response?.data;
         logger.warn(
-          { err: (e as Error).message, txId: result.id, operator: body.operator, country: user.country },
+          {
+            err: (e as Error).message,
+            errStatus: ax.response?.status,
+            errUrl,
+            errBody,
+            txId: result.id,
+            operator: body.operator,
+            country: user.country,
+          },
           'Payout auto echec, fallback manuel BO',
         );
         await prisma.transaction.update({
@@ -314,6 +327,8 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
             metadata: {
               ...((result.metadata as Record<string, unknown>) ?? {}),
               autoTriggerError: (e as Error).message,
+              autoTriggerStatus: ax.response?.status,
+              autoTriggerUrl: errUrl,
               autoTriggered: false,
             },
           },
