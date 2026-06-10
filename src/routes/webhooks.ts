@@ -378,10 +378,13 @@ async function handlePayoutEvent(_req: Request, res: Response, eventName: string
     }
   } else if (isDeclined) {
     // Echec du payout → on recredite immediatement le solde + REFUNDED.
+    // Recrediter aussi le forfait (totalDebited) puisque le user na rien recu.
+    const refundMeta = meta as { feeFixed?: number; totalDebited?: number };
+    const refundAmount = refundMeta.totalDebited ?? Number(localTx.amount);
     await prisma.$transaction([
       prisma.wallet.update({
         where: { userId: localTx.userId },
-        data: { balancePrincipal: { increment: new Prisma.Decimal(localTx.amount) } },
+        data: { balancePrincipal: { increment: new Prisma.Decimal(refundAmount) } },
       }),
       prisma.transaction.update({
         where: { id: localTx.id },
@@ -392,11 +395,25 @@ async function handlePayoutEvent(_req: Request, res: Response, eventName: string
             payoutDeclinedAt: new Date().toISOString(),
             payoutStatus: fedaPayout.status,
             payoutEventName: eventName,
+            refundedAmount: refundAmount,
           },
         },
       }),
+      // Annuler la transaction COMMISSION associee
+      ...(refundMeta.feeFixed
+        ? [
+            prisma.transaction.updateMany({
+              where: {
+                userId: localTx.userId,
+                type: 'COMMISSION',
+                metadata: { path: ['withdrawalTxId'], equals: localTx.id },
+              },
+              data: { status: 'REFUNDED' },
+            }),
+          ]
+        : []),
     ]);
-    logger.info({ localTxId: localTx.id, amount: localTx.amount.toString() }, '❌ Payout FedaPay refuse, solde recredite');
+    logger.info({ localTxId: localTx.id, refundAmount, fee: refundMeta.feeFixed }, '❌ Payout refuse, solde + frais recredites');
 
     // Push notif user
     try {

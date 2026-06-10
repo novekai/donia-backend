@@ -137,10 +137,13 @@ router.post('/:id/withdraw/refund', validate(refundSchema), async (req, res) => 
   if (tx.type !== 'WITHDRAWAL') throw BadRequest('Cette transaction n’est pas un retrait.', 'NOT_A_WITHDRAWAL');
   if (tx.status === 'REFUNDED') throw BadRequest('Retrait déjà remboursé.', 'ALREADY_REFUNDED');
 
+  // Recrediter le solde TOTAL (amount + frais) si forfait avait ete preleve
+  const refundMeta = tx.metadata as { feeFixed?: number; totalDebited?: number } | null;
+  const refundAmount = refundMeta?.totalDebited ?? Number(tx.amount);
   const result = await prisma.$transaction(async (db) => {
     await db.wallet.update({
       where: { userId: tx.userId },
-      data: { balancePrincipal: { increment: new Prisma.Decimal(tx.amount) } },
+      data: { balancePrincipal: { increment: new Prisma.Decimal(refundAmount) } },
     });
     const updated = await db.transaction.update({
       where: { id },
@@ -151,9 +154,21 @@ router.post('/:id/withdraw/refund', validate(refundSchema), async (req, res) => 
           refundedAt: new Date().toISOString(),
           refundedByAdmin: req.admin?.email ?? 'unknown',
           refundReason: reason ?? null,
+          refundedAmount: refundAmount,
         },
       },
     });
+    // Annuler la transaction COMMISSION associee
+    if (refundMeta?.feeFixed) {
+      await db.transaction.updateMany({
+        where: {
+          userId: tx.userId,
+          type: 'COMMISSION',
+          metadata: { path: ['withdrawalTxId'], equals: id },
+        },
+        data: { status: 'REFUNDED' },
+      });
+    }
     return updated;
   });
 

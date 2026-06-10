@@ -234,15 +234,25 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
     );
   }
 
+  // Forfait Donia ajoute au montant : le user retire X, son solde est debite de X + forfait.
+  // Le user reçoit exactement X sur son MM, et Donia encaisse le forfait (commission).
+  const feeFixed = await getNumericSetting('withdrawal_fee_fixed', 200);
+  const totalDebited = body.amount + feeFixed;
+
   const result = await prisma.$transaction(async (tx) => {
     const wallet = await tx.wallet.findUniqueOrThrow({ where: { userId: req.auth!.userId } });
-    if (Number(wallet.balancePrincipal) < body.amount) {
-      throw BadRequest('Solde insuffisant.', 'INSUFFICIENT_FUNDS');
+    if (Number(wallet.balancePrincipal) < totalDebited) {
+      throw BadRequest(
+        `Solde insuffisant. Pour retirer ${body.amount.toLocaleString('fr-FR')} FCFA, il te faut ${totalDebited.toLocaleString('fr-FR')} FCFA sur ton solde (${body.amount.toLocaleString('fr-FR')} FCFA + ${feeFixed.toLocaleString('fr-FR')} FCFA de frais de transaction).`,
+        'INSUFFICIENT_FUNDS',
+      );
     }
+    // 1. Decrementer le solde du montant total (retrait + forfait)
     await tx.wallet.update({
       where: { userId: req.auth!.userId },
-      data: { balancePrincipal: { decrement: new Prisma.Decimal(body.amount) } },
+      data: { balancePrincipal: { decrement: new Prisma.Decimal(totalDebited) } },
     });
+    // 2. Creer la transaction WITHDRAWAL (montant net que le user va recevoir)
     const localTx = await tx.transaction.create({
       data: {
         userId: req.auth!.userId,
@@ -255,9 +265,27 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
           phoneNumber: body.phoneNumber ?? null,
           accountNumber: body.accountNumber ?? null,
           requestedAt: new Date().toISOString(),
+          feeFixed,                                // forfait facturé
+          totalDebited,                            // ce qui a été enlevé du solde
         },
       },
     });
+    // 3. Creer une transaction COMMISSION pour le forfait Donia
+    if (feeFixed > 0) {
+      await tx.transaction.create({
+        data: {
+          userId: req.auth!.userId,
+          type: 'COMMISSION',
+          amount: new Prisma.Decimal(feeFixed),
+          status: 'SUCCESS',
+          metadata: {
+            kind: 'withdrawal_fee',
+            withdrawalTxId: localTx.id,
+            operator: body.operator,
+          },
+        },
+      });
+    }
     return localTx;
   });
 

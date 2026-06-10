@@ -7,7 +7,8 @@ import { prisma } from '../lib/prisma';
 export const SETTING_DEFAULTS = {
   commission_rate: 5,           // % prélevé sur conversion (0–100)
   min_card_amount: 500,         // FCFA — montant minimum d'envoi d'une carte
-  min_withdrawal_amount: 500,   // FCFA — montant minimum d'un retrait
+  min_withdrawal_amount: 1000,  // FCFA — montant minimum d'un retrait
+  withdrawal_fee_fixed: 200,    // FCFA — forfait Donia AJOUTE au montant retire (couvre frais Mobile Money)
   max_auto_payout_amount: 50_000, // FCFA — retrait MM <= ce montant : auto Payouts ; au-delà : workflow manuel BO
   max_amount_no_kyc: 50_000,    // FCFA — au-delà : KYC obligatoire
   active_payment_provider: 'fedapay' as 'fedapay' | 'kkiapay', // switch instantane depuis le BO

@@ -27,6 +27,7 @@ router.get('/settings', async (_req, res) => {
   res.json({
     minCardAmount: s.min_card_amount,
     minWithdrawalAmount: s.min_withdrawal_amount,
+    withdrawalFeeFixed: s.withdrawal_fee_fixed,
     maxAmountNoKyc: s.max_amount_no_kyc,
     commissionRate: s.commission_rate, // en pourcentage (0–100)
     referralLifetimeActive: s.referral_lifetime_active,

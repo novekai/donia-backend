@@ -16,7 +16,8 @@ router.use(requireAdmin);
 export const SETTING_DEFAULTS = {
   commission_rate: 5,             // % taken on conversion
   min_card_amount: 500,           // FCFA
-  min_withdrawal_amount: 500,     // FCFA — pilote depuis le BO
+  min_withdrawal_amount: 1000,    // FCFA — pilote depuis le BO
+  withdrawal_fee_fixed: 200,      // FCFA — forfait Donia ajoute au montant retire
   max_auto_payout_amount: 50_000, // FCFA — plafond pour declenchement auto Payout
   max_amount_no_kyc: 50_000,      // FCFA
   active_payment_provider: 'fedapay' as 'fedapay' | 'kkiapay', // PSP actif
