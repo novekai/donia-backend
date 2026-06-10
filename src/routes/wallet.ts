@@ -234,9 +234,9 @@ router.post('/withdraw', validate(withdrawSchema), async (req, res) => {
     );
   }
 
-  // Forfait Donia ajoute au montant : le user retire X, son solde est debite de X + forfait.
-  // Le user reçoit exactement X sur son MM, et Donia encaisse le forfait (commission).
-  const feeFixed = await getNumericSetting('withdrawal_fee_fixed', 200);
+  // Forfait Donia sur retrait : 0 par defaut depuis le 10 juin (le forfait a ete deplace a lenvoi de carte).
+  // Si tu veux remettre des frais retrait, change withdrawal_fee_fixed dans le BO.
+  const feeFixed = await getNumericSetting('withdrawal_fee_fixed', 0);
   const totalDebited = body.amount + feeFixed;
 
   const result = await prisma.$transaction(async (tx) => {

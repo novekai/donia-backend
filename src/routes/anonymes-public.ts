@@ -26,6 +26,7 @@ router.get('/settings', async (_req, res) => {
   const s = await getPlatformSettings();
   res.json({
     minCardAmount: s.min_card_amount,
+    cardSendFeeFixed: s.card_send_fee_fixed,
     minWithdrawalAmount: s.min_withdrawal_amount,
     withdrawalFeeFixed: s.withdrawal_fee_fixed,
     maxAmountNoKyc: s.max_amount_no_kyc,

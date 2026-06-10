@@ -130,6 +130,7 @@ router.post('/', validate(createSchema), async (req, res) => {
   const commissionRate = await getNumericSetting('commission_rate', env.COMMISSION_RATE);
   const minCard = await getNumericSetting('min_card_amount', 500);
   const maxNoKyc = await getNumericSetting('max_amount_no_kyc', 50_000);
+  const cardSendFee = await getNumericSetting('card_send_fee_fixed', 200);
   if (body.amount < minCard) {
     throw BadRequest(`Le montant minimum d'une carte est de ${minCard.toLocaleString('fr-FR')} FCFA`, 'AMOUNT_TOO_LOW');
   }
@@ -144,10 +145,16 @@ router.post('/', validate(createSchema), async (req, res) => {
     );
   }
 
+  // Forfait Donia ajoute au montant : le sender paie amount + fee, le destinataire recoit amount.
+  const totalDebited = body.amount + cardSendFee;
+
   const result = await prisma.$transaction(async (tx) => {
     const wallet = await tx.wallet.findUniqueOrThrow({ where: { userId: req.auth!.userId } });
-    if (Number(wallet.balancePrincipal) < body.amount) {
-      throw BadRequest('Insufficient balance', 'INSUFFICIENT_FUNDS');
+    if (Number(wallet.balancePrincipal) < totalDebited) {
+      throw BadRequest(
+        `Solde insuffisant. Pour envoyer ${body.amount.toLocaleString('fr-FR')} FCFA, il te faut ${totalDebited.toLocaleString('fr-FR')} FCFA (${body.amount.toLocaleString('fr-FR')} + ${cardSendFee.toLocaleString('fr-FR')} frais).`,
+        'INSUFFICIENT_FUNDS',
+      );
     }
     const card = await tx.card.create({
       data: {
@@ -170,7 +177,7 @@ router.post('/', validate(createSchema), async (req, res) => {
     });
     await tx.wallet.update({
       where: { userId: req.auth!.userId },
-      data: { balancePrincipal: { decrement: card.amount } },
+      data: { balancePrincipal: { decrement: new Prisma.Decimal(totalDebited) } },
     });
     await tx.transaction.create({
       data: {
@@ -179,9 +186,26 @@ router.post('/', validate(createSchema), async (req, res) => {
         amount: card.amount,
         status: 'SUCCESS',
         cardId: card.id,
-        metadata: { recipientPhone: card.recipientPhone, occasion: card.occasion },
+        metadata: {
+          recipientPhone: card.recipientPhone,
+          occasion: card.occasion,
+          feeFixed: cardSendFee,
+          totalDebited,
+        },
       },
     });
+    if (cardSendFee > 0) {
+      await tx.transaction.create({
+        data: {
+          userId: req.auth!.userId,
+          type: 'COMMISSION',
+          amount: new Prisma.Decimal(cardSendFee),
+          status: 'SUCCESS',
+          cardId: card.id,
+          metadata: { kind: 'card_send_fee', cardId: card.id },
+        },
+      });
+    }
     return card;
   });
 
