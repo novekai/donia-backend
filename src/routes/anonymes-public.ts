@@ -31,6 +31,7 @@ router.get('/settings', async (_req, res) => {
     withdrawalFeeFixed: s.withdrawal_fee_fixed,
     maxAmountNoKyc: s.max_amount_no_kyc,
     commissionRate: s.commission_rate, // en pourcentage (0–100)
+    cardPaymentEnabled: s.card_payment_enabled,
     referralLifetimeActive: s.referral_lifetime_active,
   });
 });

@@ -13,6 +13,7 @@ export const SETTING_DEFAULTS = {
   max_auto_payout_amount: 50_000, // FCFA — retrait MM <= ce montant : auto Payouts ; au-delà : workflow manuel BO
   max_amount_no_kyc: 50_000,    // FCFA — au-delà : KYC obligatoire
   active_payment_provider: 'fedapay' as 'fedapay' | 'kkiapay', // switch instantane depuis le BO
+  card_payment_enabled: false,  // CB Visa/Mastercard via Stripe — desactive tant que Stripe pas branche
   referral_lifetime_active: true,
   channel_push: true,
   channel_email: true,

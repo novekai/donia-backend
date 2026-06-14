@@ -208,8 +208,81 @@ router.delete('/:id', async (req, res) => {
   res.json({ ok: true, userId: id });
 });
 
-// Avoid TS6133 — Prisma import is for future endpoints that need decimal types.
-void Prisma;
+// POST /v1/admin/users/:id/wallet/adjust — credit ou debit manuel par l'admin
+// Usage : credit demo pour screenshots, correction d'un bug, geste commercial...
+// Cree une Transaction TOPUP_CODE (credit) ou WITHDRAWAL (debit) avec metadata.kind = 'admin_adjustment'
+// pour tracabilite. La cle reason est obligatoire et stockee dans metadata.
+const walletAdjustSchema = z.object({
+  amount: z.number().int(),                       // positif = credit, negatif = debit (FCFA)
+  reason: z.string().min(3).max(200),             // obligatoire — apparait dans la tx + logs
+  pocket: z.enum(['principal', 'referral']).default('principal'),
+});
 
+router.post('/:id/wallet/adjust', validate(walletAdjustSchema), async (req, res) => {
+  const id = req.params.id as string;
+  const { amount, reason, pocket } = req.body as z.infer<typeof walletAdjustSchema>;
+  if (amount === 0) {
+    return res.status(400).json({ error: { code: 'BAD_AMOUNT', message: 'amount must be non-zero' } });
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id },
+    include: { wallet: true },
+  });
+  if (!user) throw NotFound('User not found');
+
+  const field = pocket === 'referral' ? 'balanceReferral' : 'balancePrincipal';
+  const current = Number(user.wallet?.[field] ?? 0);
+  const next = current + amount;
+  if (next < 0) {
+    return res.status(400).json({
+      error: { code: 'INSUFFICIENT_BALANCE', message: `Solde ${pocket} insuffisant (${current} + ${amount} < 0)` },
+    });
+  }
+
+  const txType: 'TOPUP_CODE' | 'WITHDRAWAL' = amount > 0 ? 'TOPUP_CODE' : 'WITHDRAWAL';
+
+  const [, tx] = await prisma.$transaction([
+    prisma.wallet.upsert({
+      where: { userId: id },
+      update: { [field]: new Prisma.Decimal(next) },
+      create: {
+        userId: id,
+        balancePrincipal: pocket === 'principal' ? new Prisma.Decimal(next) : new Prisma.Decimal(0),
+        balanceReferral: pocket === 'referral' ? new Prisma.Decimal(next) : new Prisma.Decimal(0),
+      },
+    }),
+    prisma.transaction.create({
+      data: {
+        userId: id,
+        type: txType,
+        amount: new Prisma.Decimal(Math.abs(amount)),
+        status: 'SUCCESS',
+        metadata: {
+          kind: 'admin_adjustment',
+          reason,
+          pocket,
+          adminEmail: req.admin?.email ?? 'unknown',
+          balanceBefore: current,
+          balanceAfter: next,
+        },
+      },
+    }),
+  ]);
+
+  logger.warn(
+    { adminEmail: req.admin?.email, userId: id, userName: user.name, amount, pocket, reason, txId: tx.id },
+    `⚙️ Admin wallet adjustment: ${amount > 0 ? '+' : ''}${amount} FCFA (${pocket}) — ${reason}`,
+  );
+
+  res.json({
+    ok: true,
+    userId: id,
+    pocket,
+    balanceBefore: current,
+    balanceAfter: next,
+    transactionId: tx.id,
+  });
+});
 
 export default router;
